@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <short>KRDP</short>
+  <description>KDE Remote Desktop and Remote Login over RDP (port 3389).</description>
+  <port protocol="tcp" port="3389"/>
+</service>

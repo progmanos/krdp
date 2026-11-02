@@ -1,0 +1,17 @@
+[Domain]
+Name=KRDP
+Icon=preferences-system-network-remote
+URL=https://invent.kde.org/plasma/krdp
+
+[org.kde.kcontrol.kcmkrdpserver.save]
+Name=Save Remote Login Settings
+Name[ar]=احفظ إعدادات الولوج عن بُعد
+Name[de]=Einstellungen für Remote-Anmeldung speichern
+Name[es]=Guardar preferencias de inicio de sesión remoto
+Name[fr]=Enregistrer la configuration de connexion à distance
+Description=Administrator authorization is required to save system remote login settings
+Description[ar]=مطلوب تخويل المسؤول لحفظ إعدادات الولوج عن بُعد للنظام
+Description[de]=Administratorberechtigung ist erforderlich, um die Einstellungen für die Remote-Anmeldung zu speichern
+Description[es]=Se requiere autorización de administrador para guardar las preferencias de inicio de sesión remoto del sistema
+Description[fr]=L'autorisation administrateur est requise pour enregistrer la configuration de connexion à distance
+Policy=auth_admin

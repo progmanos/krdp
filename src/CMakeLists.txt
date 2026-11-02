@@ -18,11 +18,21 @@ target_sources(KRdp PRIVATE
     AbstractSession.cpp
     Clipboard.cpp
     Clipboard.h
+    Dispatcher.cpp
+    Dispatcher.h
+    DispatcherConnection.cpp
+    DispatcherConnection.h
     DisplayControl.cpp
     DisplayControl.h
     EiConnection.cpp
     EiConnection.h
+    HandoverClient.cpp
+    HandoverClient.h
     RdpConnection.cpp
+    Redirection.cpp
+    Redirection.h
+    SamFile.cpp
+    SamFile.h
     Server.cpp
     Server.h
     InputHandler.cpp
@@ -58,6 +68,8 @@ ecm_generate_export_header(KRdp
 
 qt6_add_dbus_interface(_dbus_sources xdp_dbus_remotedesktop_interface.xml xdp_dbus_remotedesktop_interface)
 qt6_add_dbus_interface(_dbus_sources xdp_dbus_screencast_interface.xml xdp_dbus_screencast_interface)
+qt6_add_dbus_interface(_dbus_sources org.kde.krdp.Dispatcher.xml org.kde.krdp.Dispatcher)
+qt6_add_dbus_adaptor(_dbus_sources org.kde.krdp.Dispatcher.xml Dispatcher.h KRdp::Dispatcher org_kde_krdp_dispatcher_adaptor)
 target_sources(KRdp PRIVATE ${_dbus_sources})
 
 target_include_directories(KRdp PUBLIC ${FreeRDP_INCLUDE_DIR} ${WinPR_INCLUDE_DIR} ${FreeRDP_Server_INCLUDE_DIR})

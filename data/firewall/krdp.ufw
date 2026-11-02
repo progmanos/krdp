@@ -1,0 +1,4 @@
+[KRDP]
+title=KRDP Remote Desktop and Login
+description=KDE Remote Desktop and Remote Login over RDP
+ports=3389/tcp

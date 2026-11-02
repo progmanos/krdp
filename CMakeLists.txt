@@ -43,7 +43,7 @@ find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED Core Concurrent Quick Gui Net
 
 find_package(Qt6GuiPrivate ${QT_MIN_VERSION} REQUIRED NO_MODULE)
 
-find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS Config DBusAddons KCMUtils I18n CoreAddons StatusNotifierItem Crash GuiAddons)
+find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS Config DBusAddons KCMUtils I18n CoreAddons StatusNotifierItem Crash GuiAddons Auth)
 
 find_package(FreeRDP 3.1 REQUIRED)
 find_package(WinPR 3.1 REQUIRED)
@@ -87,6 +87,7 @@ ecm_set_disabled_deprecation_versions(QT 6.11.0
 
 add_subdirectory(src)
 add_subdirectory(server)
+add_subdirectory(dispatcher)
 
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)

@@ -85,6 +85,9 @@ void PlasmaScreencastV1Session::start()
         auto screen = qApp->screens().at(*streamIndex);
         d->request.reset(d->m_screencasting.createOutputStream(screen, Screencasting::Metadata));
         d->mappingId = screen->name();
+        connect(screen, &QScreen::geometryChanged, this, [this, screen]() {
+            setLogicalSize(screen->size());
+        });
     } else {
         d->request.reset(d->m_screencasting.createWorkspaceStream(Screencasting::Metadata));
     }
@@ -93,6 +96,7 @@ void PlasmaScreencastV1Session::start()
         qCDebug(KRDP) << "Started Plasma session";
 
         setLogicalSize(d->request->size());
+        setSize(d->request->size());
         setNodeId(nodeId);
         setStarted(true);
     });

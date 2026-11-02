@@ -19,6 +19,7 @@
 #include <optional>
 #include <thread>
 
+#include <QFileInfo>
 #include <QQueue>
 #include <QSet>
 
@@ -232,6 +233,10 @@ void VideoStream::setSize(const QSize &newSize)
         return;
     }
 
+    {
+        std::lock_guard lock(d->frameQueueMutex);
+        d->frameQueue.clear();
+    }
     d->surface->size = newSize;
     Q_EMIT sizeChanged(newSize);
 }
@@ -287,7 +292,9 @@ bool VideoStream::initialize()
     // from the desktop size the client asked for when connecting.
     if (!d->surface->requestedSize.isValid()) {
         auto settings = d->session->rdpPeerContext()->settings;
-        const QSize clientSize(freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth), freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
+        const int width = static_cast<int>(freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) & ~1;
+        const int height = static_cast<int>(freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight)) & ~1;
+        const QSize clientSize(width, height);
         if (!clientSize.isEmpty()) {
             setRequestedSize(clientSize);
         }
@@ -455,9 +462,15 @@ void VideoStream::seedQuality(quint8 quality)
     applyQuality();
 }
 
+QSize VideoStream::requestedSize() const
+{
+    return d->surface->requestedSize;
+}
+
 void VideoStream::setRequestedSize(const QSize &size)
 {
-    d->surface->setRequestedSize(size);
+    const QSize alignedSize(size.width() & ~1, size.height() & ~1);
+    d->surface->setRequestedSize(alignedSize);
 }
 
 void VideoStream::setPipeWireSource(quint32 nodeId, quint64 objectSerial, int fd)

@@ -46,6 +46,7 @@ public:
     void setOperationMode(OperationMode mode);
     void setSNIStatus(const KRdp::RdpConnection::State state);
     void stopFromSNI();
+    void updateTrayMenu();
 
 private:
     void onNewConnection(KRdp::RdpConnection *newConnection);

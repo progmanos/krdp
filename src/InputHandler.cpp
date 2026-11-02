@@ -90,7 +90,7 @@ void InputHandler::initialize(rdpInput *input)
     input->MouseEvent = inputMouseEvent;
     input->ExtendedMouseEvent = inputExtendedMouseEvent;
     input->KeyboardEvent = inputKeyboardEvent;
-    input->UnicodeKeyboardEvent = inputUnicodeKeyboardEvent;
+    input->UnicodeKeyboardEvent = nullptr;
 }
 
 bool InputHandler::synchronizeEvent(uint32_t /*flags*/)

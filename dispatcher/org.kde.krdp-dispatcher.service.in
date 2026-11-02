@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+# SPDX-FileCopyrightText: 2026 Nicolas Fella <nicolas.fella@gmx.de>
+[Unit]
+Description=KRDP Dispatcher
+# Needs the D-Bus system message bus and the network to accept RDP connections.
+After=dbus.service
+
+[Service]
+Type=exec
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdp-dispatcher
+Restart=on-abnormal
+# System services get no HOME, but FreeRDP refuses to create a peer context
+# without one. Give the dispatcher a private state directory to use instead.
+StateDirectory=krdp
+StateDirectoryMode=0700
+Environment=HOME=%S/krdp
+
+[Install]
+WantedBy=multi-user.target

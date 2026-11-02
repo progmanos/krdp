@@ -29,6 +29,8 @@ public:
 
     QList<User> users;
     bool usePamAuthentication = false;
+    QStringList allowedSystemUsers;
+    QStringList allowedSystemGroups;
 
     std::filesystem::path tlsCertificate;
     std::filesystem::path tlsCertificateKey;
@@ -49,9 +51,7 @@ Server::~Server()
 
 bool Server::start()
 {
-    if (!std::filesystem::exists(d->tlsCertificate) || !std::filesystem::exists(d->tlsCertificateKey)) {
-        qCCritical(KRDP).nospace() << "A valid TLS certificate (" << QString::fromStdString(d->tlsCertificate.filename().string()) << ") and key ("
-                                   << QString::fromStdString(d->tlsCertificateKey.filename().string()) << ") is required for the server to run!";
+    if (!initialize()) {
         return false;
     }
 
@@ -61,13 +61,26 @@ bool Server::start()
         return false;
     }
 
-    // FreeRDP3 tries to use a global instance of the settings object when
-    // initializing a new peer. However, it seems to fail at actually creating a
-    // global default instance. So create one here and use that.
-    d->settings = freerdp_settings_new(FREERDP_SETTINGS_SERVER_MODE);
-
     qCDebug(KRDP) << "Listening for connections on" << serverAddress() << serverPort();
     return true;
+}
+
+bool Server::initialize()
+{
+    if (!std::filesystem::exists(d->tlsCertificate) || !std::filesystem::exists(d->tlsCertificateKey)) {
+        qCCritical(KRDP).nospace() << "A valid TLS certificate (" << QString::fromStdString(d->tlsCertificate.filename().string()) << ") and key ("
+                                   << QString::fromStdString(d->tlsCertificateKey.filename().string()) << ") is required for the server to run!";
+        return false;
+    }
+
+    if (!d->settings) {
+        // FreeRDP3 tries to use a global instance of the settings object when
+        // initializing a new peer. However, it seems to fail at actually creating a
+        // global default instance. So create one here and use that.
+        d->settings = freerdp_settings_new(FREERDP_SETTINGS_SERVER_MODE);
+    }
+
+    return d->settings != nullptr;
 }
 
 void Server::stop()
@@ -133,6 +146,26 @@ void Server::setUsePAMAuthentication(bool usePAM)
     d->usePamAuthentication = usePAM;
 }
 
+QStringList Server::allowedSystemUsers() const
+{
+    return d->allowedSystemUsers;
+}
+
+void Server::setAllowedSystemUsers(const QStringList &users)
+{
+    d->allowedSystemUsers = users;
+}
+
+QStringList Server::allowedSystemGroups() const
+{
+    return d->allowedSystemGroups;
+}
+
+void Server::setAllowedSystemGroups(const QStringList &groups)
+{
+    d->allowedSystemGroups = groups;
+}
+
 std::filesystem::path Server::tlsCertificate() const
 {
     return d->tlsCertificate;
@@ -161,7 +194,17 @@ void Server::setTlsCertificateKey(const std::filesystem::path &newTlsCertificate
     d->tlsCertificateKey = newTlsCertificateKey;
 }
 
+void Server::adoptConnection(qintptr handle)
+{
+    createConnection(handle);
+}
+
 void Server::incomingConnection(qintptr handle)
+{
+    createConnection(handle);
+}
+
+void Server::createConnection(qintptr handle)
 {
     auto session = std::make_unique<RdpConnection>(this, handle);
     auto sessionPtr = session.get();

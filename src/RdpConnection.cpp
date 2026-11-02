@@ -9,13 +9,16 @@
 
 #include "RdpConnection.h"
 
-#include <filesystem>
+#include <mutex>
 #include <optional>
 
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 
+#include <QFile>
 #include <QHostAddress>
-#include <QStandardPaths>
 #include <QTcpSocket>
 #include <QTemporaryFile>
 #include <QThread>
@@ -33,6 +36,8 @@
 #include "InputHandler.h"
 #include "NetworkDetection.h"
 #include "PeerContext_p.h"
+#include "Redirection.h"
+#include "SamFile.h"
 #include "Server.h"
 #include "VideoStream.h"
 
@@ -40,51 +45,8 @@
 
 #include "krdp_logging.h"
 
-namespace fs = std::filesystem;
-
 namespace KRdp
 {
-
-/**
- * Create the "sam" file used by FreeRDP for reading username and password
- * information. It hashes the password in the appropriate format and writes that
- * along with the username to the provided temporary file.
- */
-static bool createSamFile(QTemporaryFile &file, const QList<User> &users)
-{
-    auto runtimePath = fs::path(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation).toStdString());
-
-    auto path = runtimePath / "krdp";
-    fs::create_directories(path);
-
-    file.setFileTemplate(QString::fromStdString(path / "rdp-sam-XXXXXX"));
-    if (!file.open()) {
-        qCWarning(KRDP) << "Could not open SAM file";
-        return false;
-    }
-
-    QString data;
-
-    for (const auto &user : users) {
-        auto username = user.name.section(QLatin1Char('\\'), -1);
-        auto password = user.password.toUtf8();
-
-        std::array<uint8_t, 16> hash;
-        NTOWFv1A((LPSTR)password.data(), password.size(), hash.data());
-
-        auto entry = QStringLiteral("%1:::").arg(username);
-        for (int i = 0; i < 16; ++i) {
-            entry.append(QStringLiteral("%1").arg(hash[i], 2, 16, QLatin1Char('0')));
-        }
-        entry.append(QStringLiteral(":::\n"));
-        data.append(entry);
-    }
-
-    file.write(data.toUtf8());
-    file.close();
-
-    return true;
-}
 
 #include <security/pam_appl.h>
 
@@ -263,6 +225,13 @@ public:
     // I/O on the peer from the calling thread.
     HANDLE stopEvent = nullptr;
 
+    // Auto-reset event used to ask the run thread to send a ServerRedirection
+    // PDU. Together with pendingRedirection it marshals redirection requests
+    // from any thread onto the thread that owns the peer and its transport.
+    HANDLE redirectionEvent = nullptr;
+    std::mutex redirectionMutex;
+    std::optional<RedirectionInfo> pendingRedirection;
+
     // Ask the run thread to finish, from any thread. It owns the peer and closes
     // it as it exits, so callers never touch the peer themselves.
     void requestStop()
@@ -274,6 +243,8 @@ public:
     }
 
     QTemporaryFile samFile;
+    QString username;
+    QString clientAddress;
 };
 
 RdpConnection::RdpConnection(Server *server, qintptr socketHandle)
@@ -308,27 +279,44 @@ RdpConnection::~RdpConnection()
     if (d->thread.joinable()) {
         d->requestStop();
         d->thread.join();
-    } else if (d->peer && d->state != State::Closed) {
+    } else if (d->peer && d->peer->context && d->state != State::Closed) {
         // The run thread was never started (peer set up but initialize failed):
         // nothing else touches the peer, so close it here before freeing.
+        // freerdp_peer_context_new_ex() clears peer->context when it fails, and
+        // freerdp_peer_close() asserts on a valid context.
         d->peer->Close(d->peer);
     }
 
     if (d->peer) {
         // freerdp_peer_free() does not free the context allocated by
         // freerdp_peer_context_new_ex().
-        freerdp_peer_context_free(d->peer);
+        if (d->peer->context) {
+            freerdp_peer_context_free(d->peer);
+        }
         freerdp_peer_free(d->peer);
     }
 
     if (d->stopEvent) {
         CloseHandle(d->stopEvent);
     }
+    if (d->redirectionEvent) {
+        CloseHandle(d->redirectionEvent);
+    }
 }
 
 RdpConnection::State RdpConnection::state() const
 {
     return d->state;
+}
+
+QString RdpConnection::username() const
+{
+    return d->username;
+}
+
+QString RdpConnection::clientAddress() const
+{
+    return d->clientAddress;
 }
 
 void RdpConnection::setState(KRdp::RdpConnection::State newState)
@@ -351,6 +339,9 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
     case CloseReason::VideoInitFailed:
         freerdp_set_error_info(d->peer->context->rdp, ERRINFO_GRAPHICS_SUBSYSTEM_FAILED);
         break;
+    case CloseReason::UserLogoff:
+        freerdp_set_error_info(d->peer->context->rdp, ERRINFO_LOGOFF_BY_USER);
+        break;
     case CloseReason::None:
         break;
     }
@@ -360,6 +351,40 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
     // from video-encoding threads (VideoStream), so it must not drive the peer
     // directly - that would race with the run thread reading the same transport.
     d->requestStop();
+}
+
+void RdpConnection::sendServerRedirection(const RedirectionInfo &info)
+{
+    if (d->state == State::Closed) {
+        return;
+    }
+
+    {
+        std::lock_guard lock(d->redirectionMutex);
+        d->pendingRedirection = info;
+    }
+    if (d->redirectionEvent) {
+        SetEvent(d->redirectionEvent);
+    }
+}
+
+bool RdpConnection::sendServerRedirectionOnRunThread(const RedirectionInfo &info)
+{
+    QFile certificateFile(QString::fromStdString(d->server->tlsCertificate().string()));
+    if (!certificateFile.open(QIODevice::ReadOnly)) {
+        qCWarning(KRDP) << "Unable to read TLS certificate for redirection:" << d->server->tlsCertificate().string();
+        return false;
+    }
+
+    rdpRedirection *redirection = createServerRedirection(info, certificateFile.readAll());
+    if (!redirection) {
+        qCWarning(KRDP) << "Unable to create server redirection";
+        return false;
+    }
+
+    const auto result = d->peer->SendServerRedirection(d->peer, redirection) == TRUE;
+    redirection_free(redirection);
+    return result;
 }
 
 InputHandler *RdpConnection::inputHandler() const
@@ -474,7 +499,7 @@ void RdpConnection::initialize()
 
     freerdp_settings_set_bool(settings, FreeRDP_HasExtendedMouseEvent, true);
     freerdp_settings_set_bool(settings, FreeRDP_HasHorizontalWheel, true);
-    freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, true);
+    freerdp_settings_set_bool(settings, FreeRDP_UnicodeInput, false);
 
     // TODO: Implement network performance detection
     freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, true);
@@ -509,9 +534,16 @@ void RdpConnection::initialize()
 
     qCDebug(KRDP) << "Session setup completed, start processing...";
 
-    // Manual-reset event the run thread waits on, so teardown can wake it
-    // without protocol I/O on the peer. Created before the thread starts.
+    // Manual-reset events the run thread waits on, so teardown and redirection
+    // requests can wake it without protocol I/O on the peer. WinPR does not
+    // implement auto-reset events, so the run thread resets redirectionEvent
+    // itself. Created before the thread starts.
     d->stopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    d->redirectionEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+    if (!d->stopEvent || !d->redirectionEvent) {
+        qCWarning(KRDP) << "Unable to create session events";
+        return;
+    }
 
     // Perform actual communication on a separate thread.
     d->thread = std::jthread(std::bind(&RdpConnection::run, this, std::placeholders::_1));
@@ -526,22 +558,43 @@ void RdpConnection::run(std::stop_token stopToken)
     bool lastDrdynvcJoined = false;
     setState(State::Running);
 
+    constexpr size_t kControlEventCount = 3;
+    constexpr size_t kMaxPeerHandles = 31;
+    constexpr size_t kMaxEvents = kControlEventCount + kMaxPeerHandles;
+
     while (!stopToken.stop_requested()) {
         // events[0] = virtual channel manager, events[1] = stopEvent (signalled
-        // for teardown), the rest = peer transport handles.
-        std::array<HANDLE, 33> events{channelEvent, d->stopEvent};
-        auto handleCount = d->peer->GetEventHandles(d->peer, events.data() + 2, 31);
+        // for teardown), events[2] = redirectionEvent (signalled for server
+        // redirection), the rest = peer transport handles.
+        std::array<HANDLE, kMaxEvents> events{channelEvent, d->stopEvent, d->redirectionEvent};
+        auto handleCount = d->peer->GetEventHandles(d->peer, events.data() + kControlEventCount, kMaxPeerHandles);
         if (handleCount <= 0) {
             qCDebug(KRDP) << "Unable to get transport event handles";
             break;
         }
         // Wait for something to happen on the connection.
-        WaitForMultipleObjects(2 + handleCount, events.data(), FALSE, INFINITE);
+        WaitForMultipleObjects(kControlEventCount + handleCount, events.data(), FALSE, INFINITE);
 
         // Bail out before touching the peer transport if we were asked to stop,
         // so teardown stays race-free.
         if (stopToken.stop_requested()) {
             break;
+        }
+
+        // Send a server redirection queued by another thread, if any.
+        // redirectionEvent is manual-reset: clear it before taking the pending
+        // redirection so a request queued after this point re-signals it.
+        ResetEvent(d->redirectionEvent);
+        std::optional<RedirectionInfo> redirection;
+        {
+            std::lock_guard lock(d->redirectionMutex);
+            redirection.swap(d->pendingRedirection);
+        }
+        if (redirection) {
+            if (!sendServerRedirectionOnRunThread(*redirection)) {
+                qCWarning(KRDP) << "Unable to send server redirection";
+                break;
+            }
         }
 
         // Read data from the socket and have FreeRDP process it.
@@ -656,6 +709,16 @@ static std::optional<quint8> qualitySeedForConnectionType(uint32_t connectionTyp
 
 bool RdpConnection::onActivate()
 {
+    if (!d->videoStream->requestedSize().isValid()) {
+        auto settings = d->peer->context->settings;
+        const int width = static_cast<int>(freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth)) & ~1;
+        const int height = static_cast<int>(freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight)) & ~1;
+        const QSize clientSize(width, height);
+        if (!clientSize.isEmpty()) {
+            d->videoStream->setRequestedSize(clientSize);
+        }
+    }
+
     setState(State::Activated);
 
     if (!d->qualitySeeded) {
@@ -679,28 +742,55 @@ bool RdpConnection::onPostConnect()
     qCInfo(KRDP) << "New client connected:" << d->peer->hostname << freerdp_peer_os_major_type_string(d->peer) << freerdp_peer_os_minor_type_string(d->peer);
 
     rdpSettings *settings = d->peer->context->settings;
-    const QString username = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Username)).section(QLatin1Char('\\'), -1);
+    const QString username = QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Username)).section(QLatin1Char('\\'), -1);
+    const QString password = QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Password));
+
+    d->username = username;
+    d->clientAddress = QString::fromUtf8(d->peer->hostname);
 
     if (d->server->usePAMAuthentication()) {
-        if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
-            return false;
+        bool systemUserAllowed = false;
+        const QString currentUser = KUser().loginName();
+
+        if (currentUser == QStringLiteral("plasmalogin")) {
+            systemUserAllowed = true;
+        } else if (username == currentUser) {
+            systemUserAllowed = true;
+        } else if (d->server->allowedSystemUsers().contains(username)) {
+            systemUserAllowed = true;
+        } else {
+            const KUser targetUser(username);
+            if (targetUser.isValid()) {
+                const auto userGroups = targetUser.groupNames();
+                for (const auto &allowedGroup : d->server->allowedSystemGroups()) {
+                    if (userGroups.contains(allowedGroup)) {
+                        systemUserAllowed = true;
+                        break;
+                    }
+                }
+            }
         }
 
-        const QString password = QString::fromLatin1(freerdp_settings_get_string(settings, FreeRDP_Password));
-        qCDebug(KRDP) << "Attempting authenticating user with PAM";
-        if (username == KUser().loginName() || KUser().loginName() == QStringLiteral("plasmalogin")) {
+        if (systemUserAllowed) {
+            if (!freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, true)) {
+                return false;
+            }
+            qCDebug(KRDP) << "Attempting authenticating user with PAM:" << username;
             if (pamAuthenticate(username, password) >= 0) {
                 qCDebug(KRDP) << "PAM authentication succeeded for user" << username;
                 return true;
+            } else {
+                qCWarning(KRDP) << "PAM authentication failed for user" << username;
             }
         }
+
         const auto users = d->server->users();
-        for (auto user : users) {
+        for (const auto &user : users) {
             if (user.password.isEmpty()) {
                 continue;
             }
             if (user.name == username && user.password == password) {
-                qCDebug(KRDP) << "User" << username << "authenticated successfully";
+                qCDebug(KRDP) << "User" << username << "authenticated successfully via guest credentials";
                 return true;
             }
         }

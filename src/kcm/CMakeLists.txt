@@ -35,6 +35,7 @@ ecm_qt_declare_logging_category(kcm_krdpserver
 target_sources(kcm_krdpserver PRIVATE
    kcmkrdpserver.cpp
    kcmkrdpserver.h
+   kcmconstants.h
    usersmodel.cpp
    usersmodel.h
 )
@@ -60,6 +61,7 @@ target_link_libraries(kcm_krdpserver PRIVATE
     KF6::KCMUtils
     KF6::KCMUtilsQuick
     KF6::I18n
+    KF6::AuthCore
     K::KPipeWireRecord
 )
 
@@ -68,6 +70,8 @@ if (Systemd_FOUND)
     target_link_libraries(kcm_krdpserver PRIVATE Systemd::systemd)
     target_compile_definitions(kcm_krdpserver PRIVATE HAVE_SYSTEMD)
 endif()
+
+add_subdirectory(auth)
 
 ecm_qt_install_logging_categories(EXPORT kcm_krdpserver DESTINATION ${KDE_INSTALL_LOGGINGCATEGORIESDIR})
 

@@ -8,6 +8,10 @@
 #include "krdpserversettings.h"
 #include <PipeWireRecord>
 
+#include <KAuth/Action>
+#include <KAuth/ExecuteJob>
+#include <KConfig>
+#include <KConfigGroup>
 #include <KPluginFactory>
 #include <QClipboard>
 #include <QDBusArgument>
@@ -22,6 +26,8 @@
 #include <QNetworkInterface>
 #include <QProcess>
 #include <QQmlEngine>
+#include <QQuickItem>
+#include <QQuickWindow>
 #include <QtConcurrentRun>
 #include <qt6keychain/keychain.h>
 
@@ -36,6 +42,7 @@ static const QString passwordServiceName = QLatin1StringView("KRDP");
 static const QString dbusSystemdDestination = u"org.freedesktop.systemd1"_s;
 static const QString dbusSystemdPath = u"/org/freedesktop/systemd1"_s;
 static const QString dbusKrdpServerServicePath = u"/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ekrdpserver_2eservice"_s;
+static const QString dbusDispatcherServicePath = u"/org/freedesktop/systemd1/unit/org_2ekde_2ekrdp_2ddispatcher_2eservice"_s;
 static const QString dbusSystemdUnitInterface = u"org.freedesktop.systemd1.Unit"_s;
 static const QString dbusSystemdManagerInterface = u"org.freedesktop.systemd1.Manager"_s;
 static const QString dbusSystemdPropertiesInterface = u"org.freedesktop.DBus.Properties"_s;
@@ -45,7 +52,8 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     , m_serverSettings(new KRDPServerSettings(this))
     , m_usersModel(new UsersModel(m_serverSettings, this))
 {
-    setButtons(Help | Apply | Default);
+    setButtons(Help | Default);
+    setSupportsInstantApply(true);
 
     qmlRegisterUncreatableMetaObject(H264::staticMetaObject, qmlUri, 1, 0, "H264Support", u"Error: only enums"_s);
 
@@ -61,6 +69,16 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
                                           u"PropertiesChanged"_s,
                                           this,
                                           SLOT(servicePropertiesChanged()));
+
+    loadDispatcherConfig();
+
+    QDBusConnection::systemBus().connect(dbusSystemdDestination,
+                                         dbusDispatcherServicePath,
+                                         dbusSystemdPropertiesInterface,
+                                         u"PropertiesChanged"_s,
+                                         this,
+                                         SLOT(dispatcherServicePropertiesChanged()));
+    updateDispatcherStatus();
 }
 
 KRDPServerConfig::~KRDPServerConfig() = default;
@@ -170,6 +188,9 @@ bool KRDPServerConfig::userExists(const QString &username)
 void KRDPServerConfig::save()
 {
     KQuickManagedConfigModule::save();
+    if (m_dispatcherSettingsModified) {
+        saveRemoteLogin(m_remoteLoginEnabled, isRemoteLoginRunning(), m_remoteLoginEnabled);
+    }
     Q_EMIT krdpServerSettingsChanged();
 }
 
@@ -181,6 +202,13 @@ void KRDPServerConfig::defaults()
     auto userList = m_usersModel->users();
     KQuickManagedConfigModule::defaults();
     m_usersModel->setUsers(userList);
+
+    setDispatcherListenAddress(KRdpKcm::Defaults::ListenAddress.toString());
+    setDispatcherListenPort(KRdpKcm::Defaults::Port);
+    setDispatcherTerminateOnDisconnect(true);
+    setDispatcherAutogenerateCertificates(true);
+    setDispatcherCertificate(KRdpKcm::Defaults::CertificatePath.toString());
+    setDispatcherCertificateKey(KRdpKcm::Defaults::CertificateKeyPath.toString());
 }
 
 void KRDPServerConfig::createRestoreToken()
@@ -299,6 +327,11 @@ void KRDPServerConfig::toggleServer(const bool enabled)
 
 void KRDPServerConfig::restartServer()
 {
+    if (m_remoteLoginEnabled || isRemoteLoginRunning()) {
+        qDebug(KRDPKCM) << "Restarting KRDP Dispatcher";
+        saveRemoteLogin(true, true, m_remoteLoginEnabled);
+        return;
+    }
     qDebug(KRDPKCM) << "Restarting KRDP Server";
     auto restartMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdUnitInterface, u"Restart"_s);
     restartMsg.setArguments({u"replace"_s});
@@ -412,16 +445,7 @@ void KRDPServerConfig::setServerStatus(SystemdService::Status status)
 
 bool KRDPServerConfig::isServerRunning() const
 {
-    switch (m_currentServerStatus) {
-    case SystemdService::Running:
-        return true;
-    case SystemdService::Unknown:
-    case SystemdService::Stopped:
-    case SystemdService::Failed:
-        return false;
-    }
-    qFatal("Unhandled SystemdService::Status value");
-    return false;
+    return m_currentServerStatus == SystemdService::Running;
 }
 
 QString KRDPServerConfig::errorMessage() const
@@ -547,6 +571,264 @@ void KRDPServerConfig::copyAddressToClipboard(const QString &address)
 void KRDPServerConfig::servicePropertiesChanged()
 {
     updateServerStatus();
+}
+
+void KRDPServerConfig::dispatcherServicePropertiesChanged()
+{
+    updateDispatcherStatus();
+}
+
+SystemdService::Status KRDPServerConfig::remoteLoginStatus() const
+{
+    return m_remoteLoginStatus;
+}
+
+void KRDPServerConfig::setRemoteLoginStatus(SystemdService::Status status)
+{
+    if (m_remoteLoginStatus != status) {
+        m_remoteLoginStatus = status;
+        Q_EMIT remoteLoginStatusChanged();
+    }
+}
+
+bool KRDPServerConfig::isRemoteLoginRunning() const
+{
+    return m_remoteLoginStatus == SystemdService::Running;
+}
+
+bool KRDPServerConfig::remoteLoginEnabled() const
+{
+    return m_remoteLoginEnabled;
+}
+
+void KRDPServerConfig::setRemoteLoginEnabled(bool enabled)
+{
+    if (m_remoteLoginEnabled != enabled) {
+        m_remoteLoginEnabled = enabled;
+        Q_EMIT remoteLoginEnabledChanged();
+    }
+}
+
+QString KRDPServerConfig::remoteLoginErrorMessage() const
+{
+    return m_remoteLoginErrorMessage;
+}
+
+void KRDPServerConfig::setRemoteLoginErrorMessage(const QString &errorMessage)
+{
+    if (m_remoteLoginErrorMessage != errorMessage) {
+        m_remoteLoginErrorMessage = errorMessage;
+        Q_EMIT remoteLoginErrorMessageChanged();
+    }
+}
+
+QString KRDPServerConfig::dispatcherListenAddress() const
+{
+    return m_dispatcherListenAddress;
+}
+
+void KRDPServerConfig::setDispatcherListenAddress(const QString &address)
+{
+    if (m_dispatcherListenAddress != address) {
+        m_dispatcherListenAddress = address;
+        m_dispatcherSettingsModified = true;
+        setNeedsSave(true);
+        Q_EMIT dispatcherSettingsChanged();
+    }
+}
+
+int KRDPServerConfig::dispatcherListenPort() const
+{
+    return m_dispatcherListenPort;
+}
+
+void KRDPServerConfig::setDispatcherListenPort(int port)
+{
+    if (m_dispatcherListenPort != port) {
+        m_dispatcherListenPort = port;
+        m_dispatcherSettingsModified = true;
+        setNeedsSave(true);
+        Q_EMIT dispatcherSettingsChanged();
+    }
+}
+
+bool KRDPServerConfig::dispatcherTerminateOnDisconnect() const
+{
+    return m_dispatcherTerminateOnDisconnect;
+}
+
+void KRDPServerConfig::setDispatcherTerminateOnDisconnect(bool terminate)
+{
+    if (m_dispatcherTerminateOnDisconnect != terminate) {
+        m_dispatcherTerminateOnDisconnect = terminate;
+        m_dispatcherSettingsModified = true;
+        setNeedsSave(true);
+        Q_EMIT dispatcherSettingsChanged();
+    }
+}
+
+bool KRDPServerConfig::dispatcherAutogenerateCertificates() const
+{
+    return m_dispatcherAutogenerateCertificates;
+}
+
+void KRDPServerConfig::setDispatcherAutogenerateCertificates(bool autoGen)
+{
+    if (m_dispatcherAutogenerateCertificates != autoGen) {
+        m_dispatcherAutogenerateCertificates = autoGen;
+        m_dispatcherSettingsModified = true;
+        setNeedsSave(true);
+        Q_EMIT dispatcherSettingsChanged();
+    }
+}
+
+QString KRDPServerConfig::dispatcherCertificate() const
+{
+    return m_dispatcherCertificate;
+}
+
+void KRDPServerConfig::setDispatcherCertificate(const QString &cert)
+{
+    if (m_dispatcherCertificate != cert) {
+        m_dispatcherCertificate = cert;
+        m_dispatcherSettingsModified = true;
+        setNeedsSave(true);
+        Q_EMIT dispatcherSettingsChanged();
+    }
+}
+
+QString KRDPServerConfig::dispatcherCertificateKey() const
+{
+    return m_dispatcherCertificateKey;
+}
+
+void KRDPServerConfig::setDispatcherCertificateKey(const QString &key)
+{
+    if (m_dispatcherCertificateKey != key) {
+        m_dispatcherCertificateKey = key;
+        m_dispatcherSettingsModified = true;
+        setNeedsSave(true);
+        Q_EMIT dispatcherSettingsChanged();
+    }
+}
+
+QString KRDPServerConfig::defaultDispatcherCertificatePath() const
+{
+    return KRdpKcm::Defaults::CertificatePath.toString();
+}
+
+QString KRDPServerConfig::defaultDispatcherCertificateKeyPath() const
+{
+    return KRdpKcm::Defaults::CertificateKeyPath.toString();
+}
+
+void KRDPServerConfig::loadDispatcherConfig()
+{
+    KConfig config(KRdpKcm::Defaults::ConfigPath.toString(), KConfig::SimpleConfig);
+    KConfigGroup group = config.group(KRdpKcm::Defaults::ConfigGroupGeneral);
+
+    m_dispatcherListenAddress = group.readEntry("ListenAddress", KRdpKcm::Defaults::ListenAddress.toString());
+    m_dispatcherListenPort = group.readEntry("ListenPort", KRdpKcm::Defaults::Port);
+    m_dispatcherTerminateOnDisconnect = group.readEntry("TerminateOnDisconnect", true);
+    m_dispatcherAutogenerateCertificates = group.readEntry("AutogenerateCertificates", true);
+    m_dispatcherCertificate = group.readEntry("Certificate", KRdpKcm::Defaults::CertificatePath.toString());
+    m_dispatcherCertificateKey = group.readEntry("CertificateKey", KRdpKcm::Defaults::CertificateKeyPath.toString());
+    m_dispatcherSettingsModified = false;
+    Q_EMIT dispatcherSettingsChanged();
+}
+
+void KRDPServerConfig::updateDispatcherStatus()
+{
+    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusDispatcherServicePath, dbusSystemdPropertiesInterface, u"Get"_s);
+    msg.setArguments({u"org.freedesktop.systemd1.Unit"_s, u"ActiveState"_s});
+
+    QDBusPendingCall pcall = QDBusConnection::systemBus().asyncCall(msg);
+    auto watcher = new QDBusPendingCallWatcher(pcall, this);
+
+    connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<QVariant> reply(*w);
+        const QString replyString = reply.value().toString();
+        if (replyString == "active"_L1 || replyString == "reloading"_L1) {
+            setRemoteLoginStatus(SystemdService::Status::Running);
+        } else if (replyString == "failed"_L1) {
+            setRemoteLoginStatus(SystemdService::Status::Failed);
+            auto invocationIdMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusDispatcherServicePath, dbusSystemdPropertiesInterface, u"Get"_s);
+            invocationIdMsg.setArguments({u"org.freedesktop.systemd1.Unit"_s, u"InvocationID"_s});
+
+            QDBusPendingCall idCall = QDBusConnection::systemBus().asyncCall(invocationIdMsg);
+            auto idWatcher = new QDBusPendingCallWatcher(idCall, this);
+            connect(idWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *iw) {
+                QDBusPendingReply<QDBusVariant> idReply(*iw);
+                const auto invId = QString::fromUtf8(idReply.value().variant().toByteArray().toHex());
+                setRemoteLoginErrorMessage(getLastJournalEntries(u"org.kde.krdp-dispatcher.service"_s, invId).join(u"\n"_s));
+                iw->deleteLater();
+            });
+        } else if (replyString == "inactive"_L1) {
+            setRemoteLoginStatus(SystemdService::Status::Stopped);
+        } else {
+            setRemoteLoginStatus(SystemdService::Status::Unknown);
+        }
+        w->deleteLater();
+    });
+
+    auto stateMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusSystemdPath, dbusSystemdManagerInterface, u"GetUnitFileState"_s);
+    stateMsg.setArguments({u"org.kde.krdp-dispatcher.service"_s});
+    QDBusPendingCall stateCall = QDBusConnection::systemBus().asyncCall(stateMsg);
+    auto stateWatcher = new QDBusPendingCallWatcher(stateCall, this);
+    connect(stateWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
+        QDBusPendingReply<QString> stateReply(*w);
+        if (!stateReply.isError()) {
+            const QString state = stateReply.value();
+            setRemoteLoginEnabled(state == "enabled"_L1 || state == "enabled-runtime"_L1);
+        }
+        w->deleteLater();
+    });
+}
+
+void KRDPServerConfig::saveRemoteLogin(bool enableService, bool restartIfRunning, bool enableOnBoot)
+{
+    auto action = KAuth::Action(KRdpKcm::Auth::ActionSave.toString());
+    action.setHelperId(KRdpKcm::Auth::HelperId.toString());
+    if (mainUi() && mainUi()->window()) {
+        action.setParentWindow(mainUi()->window());
+    }
+
+    QVariantMap args;
+    args[KRdpKcm::Auth::KeyEnableService.toString()] = enableService;
+    args[KRdpKcm::Auth::KeyEnableOnBoot.toString()] = enableOnBoot;
+    args[KRdpKcm::Auth::KeyListenAddress.toString()] = m_dispatcherListenAddress;
+    args[KRdpKcm::Auth::KeyListenPort.toString()] = m_dispatcherListenPort;
+    args[KRdpKcm::Auth::KeyTerminateOnDisconnect.toString()] = m_dispatcherTerminateOnDisconnect;
+    args[KRdpKcm::Auth::KeyAutogenerateCertificates.toString()] = m_dispatcherAutogenerateCertificates;
+    args[KRdpKcm::Auth::KeyCertificate.toString()] = m_dispatcherCertificate;
+    args[KRdpKcm::Auth::KeyCertificateKey.toString()] = m_dispatcherCertificateKey;
+    if (restartIfRunning) {
+        args[KRdpKcm::Auth::KeyRestartService.toString()] = true;
+    }
+    action.setArguments(args);
+
+    auto *job = action.execute();
+    connect(job, &KJob::result, this, [this, job, enableOnBoot]() {
+        if (job->error()) {
+            qCWarning(KRDPKCM) << "KAuth saveRemoteLogin failed:" << job->errorString();
+            setNeedsSave(true);
+            Q_EMIT saveRemoteLoginFailed(job->errorString());
+            updateDispatcherStatus();
+        } else {
+            qCDebug(KRDPKCM) << "KAuth saveRemoteLogin succeeded";
+            m_dispatcherSettingsModified = false;
+            setNeedsSave(false);
+            setRemoteLoginEnabled(enableOnBoot);
+            Q_EMIT saveRemoteLoginSucceeded();
+            updateDispatcherStatus();
+        }
+    });
+    job->start();
+}
+
+void KRDPServerConfig::toggleDispatcherAutostart(bool enableOnBoot)
+{
+    saveRemoteLogin(isRemoteLoginRunning(), false, enableOnBoot);
 }
 
 #include "kcmkrdpserver.moc"

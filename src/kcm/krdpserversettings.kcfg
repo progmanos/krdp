@@ -39,6 +39,12 @@ SPDX-License-Identifier: BSD-2-Clause
       <label>Whether the current user can log in via PAM</label>
       <default>false</default>
     </entry>
+    <entry name="allowedSystemUsers" key="AllowedSystemUsers" type="StringList">
+      <label>Additional system users allowed to connect via PAM</label>
+    </entry>
+    <entry name="allowedSystemGroups" key="AllowedSystemGroups" type="StringList">
+      <label>System groups allowed to connect via PAM</label>
+    </entry>
     <entry name="autostart" key="Autostart" type="Bool">
       <label>Autostart the server on login</label>
       <default>false</default>

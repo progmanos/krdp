@@ -4,6 +4,7 @@
 Description=KRDP Server
 After=plasma-xdg-desktop-portal-kde.service
 After=plasma-core.target
+ConditionEnvironment=!PLASMALOGIN_REMOTE_ID
 
 [Service]
 Type=exec

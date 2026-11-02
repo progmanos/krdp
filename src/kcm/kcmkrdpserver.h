@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "kcmconstants.h"
 #include "krdpserversettings.h"
 #include "usersmodel.h"
 #include <KQuickManagedConfigModule>
@@ -43,8 +44,12 @@ class KRDPServerConfig : public KQuickManagedConfigModule
 {
     Q_OBJECT
 public:
+    static inline constexpr int DefaultRdpPort = KRdpKcm::Defaults::Port;
+
     explicit KRDPServerConfig(QObject *parent, const KPluginMetaData &data);
     ~KRDPServerConfig() override;
+
+    Q_PROPERTY(int defaultRdpPort READ defaultRdpPort CONSTANT)
 
     Q_PROPERTY(SystemdService::Status serverStatus READ serverStatus NOTIFY serverStatusChanged);
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorMessageChanged);
@@ -56,6 +61,24 @@ public:
     Q_PROPERTY(H264::Support h264Support READ h264Support NOTIFY h264SupportChanged)
 
     Q_PROPERTY(QAbstractItemModel *users READ usersModel CONSTANT)
+
+    // Remote Login (Dispatcher / System Service) properties
+    Q_PROPERTY(SystemdService::Status remoteLoginStatus READ remoteLoginStatus NOTIFY remoteLoginStatusChanged)
+    Q_PROPERTY(bool isRemoteLoginRunning READ isRemoteLoginRunning NOTIFY remoteLoginStatusChanged)
+    Q_PROPERTY(bool remoteLoginEnabled READ remoteLoginEnabled WRITE setRemoteLoginEnabled NOTIFY remoteLoginEnabledChanged)
+    Q_PROPERTY(QString remoteLoginErrorMessage READ remoteLoginErrorMessage NOTIFY remoteLoginErrorMessageChanged)
+
+    Q_PROPERTY(QString dispatcherListenAddress READ dispatcherListenAddress WRITE setDispatcherListenAddress NOTIFY dispatcherSettingsChanged)
+    Q_PROPERTY(int dispatcherListenPort READ dispatcherListenPort WRITE setDispatcherListenPort NOTIFY dispatcherSettingsChanged)
+    Q_PROPERTY(
+        bool dispatcherTerminateOnDisconnect READ dispatcherTerminateOnDisconnect WRITE setDispatcherTerminateOnDisconnect NOTIFY dispatcherSettingsChanged)
+    Q_PROPERTY(bool dispatcherAutogenerateCertificates READ dispatcherAutogenerateCertificates WRITE setDispatcherAutogenerateCertificates NOTIFY
+                   dispatcherSettingsChanged)
+    Q_PROPERTY(QString dispatcherCertificate READ dispatcherCertificate WRITE setDispatcherCertificate NOTIFY dispatcherSettingsChanged)
+    Q_PROPERTY(QString dispatcherCertificateKey READ dispatcherCertificateKey WRITE setDispatcherCertificateKey NOTIFY dispatcherSettingsChanged)
+
+    Q_PROPERTY(QString defaultDispatcherCertificatePath READ defaultDispatcherCertificatePath CONSTANT)
+    Q_PROPERTY(QString defaultDispatcherCertificateKeyPath READ defaultDispatcherCertificateKeyPath CONSTANT)
 
     Q_INVOKABLE QString toLocalFile(const QUrl &url);
 
@@ -88,6 +111,44 @@ public:
 
     QString errorMessage() const;
 
+    // Remote Login (Dispatcher) methods
+    SystemdService::Status remoteLoginStatus() const;
+    Q_INVOKABLE [[nodiscard]] bool isRemoteLoginRunning() const;
+    bool remoteLoginEnabled() const;
+    void setRemoteLoginEnabled(bool enabled);
+    QString remoteLoginErrorMessage() const;
+
+    QString dispatcherListenAddress() const;
+    void setDispatcherListenAddress(const QString &address);
+
+    int dispatcherListenPort() const;
+    void setDispatcherListenPort(int port);
+
+    bool dispatcherTerminateOnDisconnect() const;
+    void setDispatcherTerminateOnDisconnect(bool terminate);
+
+    bool dispatcherAutogenerateCertificates() const;
+    void setDispatcherAutogenerateCertificates(bool autoGen);
+
+    QString dispatcherCertificate() const;
+    void setDispatcherCertificate(const QString &cert);
+
+    QString dispatcherCertificateKey() const;
+    void setDispatcherCertificateKey(const QString &key);
+
+    QString defaultDispatcherCertificatePath() const;
+    QString defaultDispatcherCertificateKeyPath() const;
+
+    Q_INVOKABLE void updateDispatcherStatus();
+    Q_INVOKABLE void saveRemoteLogin(bool enableService, bool restartIfRunning, bool enableOnBoot = true);
+    Q_INVOKABLE void toggleDispatcherAutostart(bool enableOnBoot);
+    Q_INVOKABLE void loadDispatcherConfig();
+
+    int defaultRdpPort() const
+    {
+        return DefaultRdpPort;
+    }
+
     QString hostName() const;
     bool managementAvailable() const;
     H264::Support h264Support() const;
@@ -111,10 +172,19 @@ Q_SIGNALS:
     void isServerRunningChanged();
     void h264SupportChanged();
 
+    void remoteLoginStatusChanged();
+    void remoteLoginEnabledChanged();
+    void remoteLoginErrorMessageChanged();
+    void dispatcherSettingsChanged();
+    void saveRemoteLoginSucceeded();
+    void saveRemoteLoginFailed(const QString &errorText);
+
 private:
     void probeH264Support();
     void setServerStatus(SystemdService::Status status);
     void setErrorMessage(const QString &errorMessage);
+    void setRemoteLoginStatus(SystemdService::Status status);
+    void setRemoteLoginErrorMessage(const QString &errorMessage);
     void createRestoreToken();
     QStringList getLastJournalEntries(const QString &unit, const QString &invocationId);
 #ifdef HAVE_SYSTEMD
@@ -124,9 +194,22 @@ private:
     KRDPServerSettings *m_serverSettings;
     UsersModel *m_usersModel;
     Q_SLOT void servicePropertiesChanged();
+    Q_SLOT void dispatcherServicePropertiesChanged();
     H264::Support m_h264Support{H264::Unknown};
-    SystemdService::Status m_currentServerStatus;
+    SystemdService::Status m_currentServerStatus{SystemdService::Unknown};
     QString m_lastErrorMessage;
+
+    SystemdService::Status m_remoteLoginStatus{SystemdService::Unknown};
+    bool m_remoteLoginEnabled{false};
+    QString m_remoteLoginErrorMessage;
+
+    QString m_dispatcherListenAddress{KRdpKcm::Defaults::ListenAddress.toString()};
+    int m_dispatcherListenPort{KRdpKcm::Defaults::Port};
+    bool m_dispatcherTerminateOnDisconnect{true};
+    bool m_dispatcherAutogenerateCertificates{true};
+    QString m_dispatcherCertificate{KRdpKcm::Defaults::CertificatePath.toString()};
+    QString m_dispatcherCertificateKey{KRdpKcm::Defaults::CertificateKeyPath.toString()};
+    bool m_dispatcherSettingsModified{false};
 
     template<typename Output, typename Input>
     Output narrow(Input i)

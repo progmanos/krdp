@@ -6,6 +6,7 @@
 
 #include "freerdp/server/disp.h"
 #include <QObject>
+#include <QSize>
 
 #include "krdp_export.h"
 
@@ -23,6 +24,7 @@ public:
 
     bool initialize();
     void close();
+    void setRequestedMonitorSize(const QSize &size);
 
 Q_SIGNALS:
     void requestedScreenSizeChanged(const QSize &size);
@@ -30,6 +32,7 @@ Q_SIGNALS:
 private:
     RdpConnection *m_session = nullptr;
     DispServerContext *m_dispManager = nullptr;
+    QSize m_lastSize;
 };
 
 }

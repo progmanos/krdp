@@ -1,0 +1,96 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<!--
+    SPDX-FileCopyrightText: 2026 Nicolas Fella <nicolas.fella@gmx.de>
+    SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+-->
+<node>
+  <!--
+    Interface provided by the KRdp Dispatcher, the system daemon that owns the
+    RDP listener and hands incoming remote clients over to session daemons
+    (the greeter and the user session) as they come up.
+
+    Session daemons are invoked with the remote id they should handle and
+    connect to this interface. The handover sequence for a single remote
+    client spans two hops:
+
+      1. login session:  client -> dispatcher -> greeter (login screen)
+      2. user session:   greeter -> user session
+
+    For each hop the target session calls StartHandover() with one-time
+    credentials. The dispatcher then either sends the ServerRedirection PDU
+    itself (while still holding the client) or asks the session that currently
+    owns the client to do so via the RedirectClient signal. The client
+    reconnects with the routing token, the dispatcher peeks it, emits
+    TakeClientReady and returns the socket to the waiting session via
+    TakeClient().
+  -->
+  <interface name="org.kde.krdp.Dispatcher">
+    <method name="StartHandover">
+      <arg type="s" name="remoteId" direction="in"/>
+      <arg type="s" name="username" direction="in"/>
+      <arg type="s" name="password" direction="in"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Called by a session daemon to take over the remote client for the
+          given remote id. Returns the certificate and key the session should
+          use for its RDP listener.
+        </doc:description>
+      </doc:doc>
+      <arg type="s" name="certificate" direction="out"/>
+      <arg type="s" name="certificateKey" direction="out"/>
+    </method>
+    <method name="TakeClient">
+      <arg type="s" name="remoteId" direction="in"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Retrieves the socket connected to the reconnected remote client.
+          Returns it as a Unix file descriptor. Only the session that called
+          StartHandover() for this remote id may call this.
+        </doc:description>
+      </doc:doc>
+      <arg type="h" name="socket" direction="out"/>
+    </method>
+    <signal name="TakeClientReady">
+      <arg type="s" name="remoteId"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Emitted to the session that called StartHandover() when the remote
+          client has reconnected and the socket is ready to be transferred via
+          TakeClient().
+        </doc:description>
+      </doc:doc>
+    </signal>
+    <signal name="RedirectClient">
+      <arg type="s" name="remoteId"/>
+      <arg type="s" name="username"/>
+      <arg type="s" name="password"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Emitted to the session that currently owns the remote client,
+          telling it to redirect its RDP client to the session that called
+          StartHandover().
+        </doc:description>
+      </doc:doc>
+    </signal>
+    <signal name="ClientConnected">
+      <arg type="s" name="remoteId"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Emitted when a new (not yet redirected) RDP client has connected to
+          the dispatcher. A display manager can use this to start a greeter
+          session for the given remote id.
+        </doc:description>
+      </doc:doc>
+    </signal>
+    <signal name="ClientDisconnected">
+      <arg type="s" name="remoteId"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Emitted when the remote client for the given remote id has gone away
+          or the handover was aborted.
+        </doc:description>
+      </doc:doc>
+    </signal>
+  </interface>
+</node>

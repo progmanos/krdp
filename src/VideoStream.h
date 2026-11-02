@@ -87,6 +87,7 @@ public:
     void setVideoQuality(quint8 quality);
     void setAdaptiveQuality(bool enabled);
     void seedQuality(quint8 quality);
+    QSize requestedSize() const;
     void setRequestedSize(const QSize &size);
     void setPipeWireSource(quint32 nodeId, quint64 objectSerial, int fd = -1);
 

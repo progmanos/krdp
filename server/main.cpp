@@ -16,6 +16,7 @@
 
 #include <qt6keychain/keychain.h>
 
+#include "HandoverManager.h"
 #include "Server.h"
 #include "SessionController.h"
 #include "krdp_version.h"
@@ -72,6 +73,10 @@ int main(int argc, char **argv)
         {u"adaptive-quality"_s,
          u"Adjust the encoding quality at runtime based on the client's network conditions, up to --quality. On by default; only matters if disabled in the configuration."_s},
         {u"static-quality"_s, u"Pin the encoding quality at --quality instead of adapting it to the client's network conditions."_s},
+        {u"handover"_s, u"Run as the destination of a remote login handover with the system KRdp dispatcher, instead of listening for connections."_s},
+        {u"remote-id"_s, u"The remote id of the client to serve. Must be used with --handover."_s, u"remote-id"_s},
+        {u"terminate-on-disconnect"_s, u"Terminate the user session when the client disconnects (default in handover mode)."_s},
+        {u"no-terminate-on-disconnect"_s, u"Do not terminate the user session when the client disconnects."_s},
 #ifdef WITH_PLASMA_SESSION
         {u"plasma"_s, u"Use Plasma protocols instead of XDP"_s},
 #endif
@@ -105,6 +110,13 @@ int main(int argc, char **argv)
     auto certificate = std::filesystem::path(parserValueWithDefault(u"certificate", config->certificate()).toStdString());
     auto certificateKey = std::filesystem::path(parserValueWithDefault(u"certificate-key", config->certificateKey()).toStdString());
 
+    const QString remoteId = parser.isSet(u"remote-id"_s) ? parser.value(u"remote-id"_s) : qEnvironmentVariable("PLASMALOGIN_REMOTE_ID");
+    const bool handover = parser.isSet(u"handover"_s) || !remoteId.isEmpty();
+    if (handover && remoteId.isEmpty()) {
+        qWarning() << "--handover requires a --remote-id.";
+        return -1;
+    }
+
     KRdp::Server server(nullptr);
 
     server.setAddress(address);
@@ -114,15 +126,18 @@ int main(int argc, char **argv)
     server.setTlsCertificateKey(certificateKey);
 
     // Use parsed username/pw if set
-    if (parser.isSet(u"username"_s)) {
+    if (!handover && parser.isSet(u"username"_s)) {
         KRdp::User user;
         user.name = parser.value(u"username"_s);
         user.password = parser.value(u"password"_s);
         server.addUser(user);
     }
     // Otherwise use KCM username list
-    else {
-        server.setUsePAMAuthentication(config->systemUserEnabled());
+    else if (!handover) {
+        const bool pamNeeded = config->systemUserEnabled() || !config->allowedSystemUsers().isEmpty() || !config->allowedSystemGroups().isEmpty();
+        server.setUsePAMAuthentication(pamNeeded);
+        server.setAllowedSystemUsers(config->allowedSystemUsers());
+        server.setAllowedSystemGroups(config->allowedSystemGroups());
 
         const auto users = config->users();
         for (const auto &userName : users) {
@@ -140,13 +155,23 @@ int main(int argc, char **argv)
             });
             readJob->start();
         }
-        if (users.isEmpty() && !server.usePAMAuthentication()) {
+        if (users.isEmpty() && !pamNeeded) {
             qWarning() << "No users configured for login. Either pass a username/password or configure users using kcm_krdp.";
             return -1;
         }
     }
+    // In handover mode the intended user is added by the HandoverManager when
+    // the dispatcher answers, so do not load any users from the configuration.
+    else {
+        server.setUsePAMAuthentication(false);
+    }
 
-    SessionController controller(&server, parser.isSet(u"plasma"_s) ? SessionController::SessionType::Plasma : SessionController::SessionType::Portal);
+    const auto sessionType =
+#ifdef WITH_PLASMA_SESSION
+        (parser.isSet(u"plasma"_s) || handover) ? SessionController::SessionType::Plasma :
+#endif
+                                                SessionController::SessionType::Portal;
+    SessionController controller(&server, sessionType);
     if (parser.isSet(u"virtual-monitor"_s)) {
         const QString vmData = parser.value(u"virtual-monitor"_s);
         const QRegularExpression rx(uR"((\d+)x(\d+)@([\d.]+))"_s);
@@ -156,8 +181,15 @@ int main(int argc, char **argv)
             return 1;
         }
         controller.setVirtualMonitor({vmData, {match.capturedView(1).toInt(), match.capturedView(2).toInt()}, match.capturedView(3).toDouble()});
+    } else if (parser.isSet(u"monitor"_s)) {
+        controller.setMonitorIndex(parser.value(u"monitor"_s).toInt());
+    } else if (handover) {
+        // Headless remote sessions already run KWin with --virtual, so stream
+        // the primary virtual output directly.
+        constexpr int kPrimaryMonitorIndex = 0;
+        controller.setMonitorIndex(kPrimaryMonitorIndex);
     } else {
-        controller.setMonitorIndex(parser.isSet(u"monitor"_s) ? std::optional(parser.value(u"monitor"_s).toInt()) : std::nullopt);
+        controller.setMonitorIndex(std::nullopt);
     }
     controller.setQuality(parserValueWithDefault(u"quality", config->quality()));
     controller.setAdaptiveQuality((parser.isSet(u"adaptive-quality"_s) || config->adaptiveQuality()) && !parser.isSet(u"static-quality"_s));
@@ -170,6 +202,24 @@ int main(int argc, char **argv)
         controller.setOperationMode(*mode);
     } else {
         controller.setOperationMode(config->exclusiveMode() ? SessionController::OperationMode::RemoteAccess : SessionController::OperationMode::SharedAccess);
+    }
+
+    if (handover) {
+        bool terminateOnDisconnect = true;
+        {
+            KSharedConfig::Ptr dispatcherConfig = KSharedConfig::openConfig(QStringLiteral("krdpdispatcherrc"));
+            KConfigGroup generalGroup = dispatcherConfig->group(QStringLiteral("General"));
+            terminateOnDisconnect = generalGroup.readEntry("TerminateOnDisconnect", true);
+        }
+        if (parser.isSet(u"no-terminate-on-disconnect"_s)) {
+            terminateOnDisconnect = false;
+        } else if (parser.isSet(u"terminate-on-disconnect"_s)) {
+            terminateOnDisconnect = true;
+        }
+
+        auto handoverManager = std::make_unique<HandoverManager>(remoteId, &server, terminateOnDisconnect);
+        handoverManager->start();
+        return application.exec();
     }
 
     if (!server.start()) {

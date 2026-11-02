@@ -11,6 +11,7 @@
 
 #include <freerdp/freerdp.h>
 
+#include "Redirection.h"
 #include "krdp_export.h"
 
 namespace KRdp
@@ -59,6 +60,7 @@ public:
         None, ///< No particular reason, e.g. closing due to normal operation
               ///  like client disconnect.
         VideoInitFailed, ///< VideoStream failed to initialize.
+        UserLogoff, ///< User logged off from the session.
     };
 
     /**
@@ -78,12 +80,37 @@ public:
     Q_SIGNAL void stateChanged(State newState);
 
     /**
+     * The username of the authenticated client.
+     */
+    QString username() const;
+
+    /**
+     * The IP address / host of the connected client.
+     */
+    QString clientAddress() const;
+
+    /**
      * Close the connection
      *
      * \param reason The reason to close the connection. May set error state if
      *               it is something different than CloseReason::None.
      */
     void close(CloseReason reason = CloseReason::None);
+
+    /**
+     * Ask the client to disconnect and reconnect to a different KRdp instance.
+     *
+     * A ServerRedirection PDU is sent to the client, containing a routing
+     * token and one-time credentials so it can reconnect to the destination
+     * session. This is used when a login session hands over a remote client to
+     * the user session.
+     *
+     * The PDU is sent from the session's run thread, so this method is safe to
+     * call from any thread.
+     *
+     * \param info The routing token and credentials for the destination.
+     */
+    void sendServerRedirection(const RedirectionInfo &info);
 
     /**
      * The InputHandler instance associated with this session.
@@ -129,6 +156,7 @@ private:
     bool onPostConnect();
     bool onClose();
     bool onSuppressOutput(uint8_t allow);
+    bool sendServerRedirectionOnRunThread(const RedirectionInfo &info);
 
     class Private;
     const std::unique_ptr<Private> d;

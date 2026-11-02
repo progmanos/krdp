@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+[Unit]
+Description=KRDP Remote Login Handover Server
+# plasma-kwin_wayland.service is Type=dbus (BusName=org.kde.KWinWrapper) and only
+# becomes ready once kwin_wayland_wrapper has exported WAYLAND_DISPLAY to the
+# systemd user environment, so ordering after it is enough to get a valid display.
+# Do not order after plasma-workspace(-wayland).target: this unit is WantedBy
+# plasma-workspace.target, which is implicitly ordered after it (ordering cycle).
+Requires=plasma-kwin_wayland.service
+After=plasma-kwin_wayland.service
+After=plasma-core.target
+PartOf=graphical-session.target
+Conflicts=app-org.kde.krdpserver.service
+ConditionEnvironment=PLASMALOGIN_REMOTE_ID
+
+[Service]
+Type=exec
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/krdpserver --plasma --monitor 0 --handover
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=plasma-workspace.target

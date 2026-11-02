@@ -44,6 +44,28 @@ Currently, the main client that has been used for testing and is confirmed to wo
 
 In addition, a valid TLS certificate and key are required to encrypt the communication between client and server. The server will look for a file called `server.crt` and `server.key` in the current working directory, but a different path can be provided using the `--certificate` and `--certificate-key` command line parameters. If no valid certificate is found using any of these methods, the server will internally generate a self-signed certificate and use that.
 
+# Remote login
+
+KRdp supports a remote login flow similar to that of the GNOME Remote Desktop. A
+system daemon, `krdp-dispatcher`, owns the actual RDP listener. A client that
+connects to it is handed over to the session that should serve it, first to the
+greeter (login screen) and then, once the user has logged in, to the user
+session. The handover uses RDP Server Redirection: the client is told to
+disconnect and reconnect with a routing token, and the dispatcher passes the
+reconnected socket to the destination session over the system D-Bus.
+
+The dispatcher is configured through `/etc/xdg/krdpdispatcherrc` and is started
+by its systemd service `krdp-dispatcher.service`. It requires a TLS certificate
+and key, which can be set with the `Certificate`/`CertificateKey` configuration
+keys or the `--certificate`/`--certificate-key` command line options.
+
+Session daemons participate in the handover by running `krdpserver` with
+`--handover --remote-id <remote-id>`. In this mode the server does not listen
+for connections; instead it asks the dispatcher to redirect the client to it and
+then adopts the socket the dispatcher hands over. It is the responsibility of
+the login manager to start a session daemon with the matching remote id for the
+greeter and for the user session.
+
 # Command Line Options
 
 The following command line options are available for the example server:
@@ -64,6 +86,10 @@ The following command line options are available for the example server:
     <dd>Set the operation mode to <code>RemoteAccess</code>, <code>SharedAccess</code>, or <code>AdditionalDisplay</code>.</dd>
     <dt>--quality <quality></dt>
     <dd>Set the video quality, from 0 (lowest) to 100 (highest).</dd>
+    <dt>--handover</dt>
+    <dd>Run as the destination of a remote login handover with the system KRdp dispatcher instead of listening for connections. See "Remote login" below.</dd>
+    <dt>--remote-id <remote-id></dt>
+    <dd>The remote id of the client to serve when using <code>--handover</code>.</dd>
 </dl>
 
 # Known Working and Not-Working Clients

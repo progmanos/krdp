@@ -5,7 +5,7 @@ add_definitions(-DTRANSLATION_DOMAIN=\"krdpserver\")
 
 add_executable(krdpserver)
 
-target_sources(krdpserver PRIVATE main.cpp SessionController.cpp)
+target_sources(krdpserver PRIVATE main.cpp SessionController.cpp HandoverManager.cpp)
 
 kconfig_target_kcfg_file(krdpserver FILE krdpserversettings.kcfg CLASS_NAME ServerConfig SINGLETON)
 
@@ -19,8 +19,17 @@ endif()
 
 configure_file(org.kde.krdpserver.desktop.cmake ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpserver.desktop @ONLY)
 configure_file(app-org.kde.krdpserver.service.in ${CMAKE_CURRENT_BINARY_DIR}/app-org.kde.krdpserver.service @ONLY)
+configure_file(plasma-krdpserver-handover.service.in ${CMAKE_CURRENT_BINARY_DIR}/plasma-krdpserver-handover.service @ONLY)
 
 install(TARGETS krdpserver DESTINATION ${KDE_INSTALL_BINDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.kde.krdpserver.desktop DESTINATION ${KDE_INSTALL_APPDIR})
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/app-org.kde.krdpserver.service DESTINATION ${KDE_INSTALL_SYSTEMDUSERUNITDIR})
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/plasma-krdpserver-handover.service DESTINATION ${KDE_INSTALL_SYSTEMDUSERUNITDIR})
+install(CODE "
+    file(MAKE_DIRECTORY \"\$ENV{DESTDIR}${KDE_INSTALL_FULL_SYSTEMDUSERUNITDIR}/plasma-workspace.target.wants\")
+    file(REMOVE \"\$ENV{DESTDIR}${KDE_INSTALL_FULL_SYSTEMDUSERUNITDIR}/plasma-workspace.target.wants/plasma-krdpserver-handover.service\")
+    file(CREATE_LINK \"../plasma-krdpserver-handover.service\"
+         \"\$ENV{DESTDIR}${KDE_INSTALL_FULL_SYSTEMDUSERUNITDIR}/plasma-workspace.target.wants/plasma-krdpserver-handover.service\"
+         SYMBOLIC)
+")
 install(FILES 00-krdp.preset DESTINATION ${KDE_INSTALL_SYSTEMDUNITDIR}/user-preset)

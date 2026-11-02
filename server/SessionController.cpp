@@ -13,7 +13,10 @@
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
 #include <QDBusReply>
+#include <QInputEvent>
 #include <QMenu>
+#include <QTimer>
+#include <chrono>
 
 #include <KLocalizedString>
 
@@ -51,13 +54,70 @@ public:
         connect(connection->videoStream(), &KRdp::VideoStream::cursorChanged, this, &SessionWrapper::onCursorUpdate);
         connect(connection->videoStream(), &KRdp::VideoStream::sizeChanged, session.get(), &KRdp::AbstractSession::setSize);
         connect(connection->videoStream(), &KRdp::VideoStream::enabledChanged, this, &SessionWrapper::onVideoStreamEnabledChanged);
-        connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, session.get(), &KRdp::AbstractSession::sendEvent);
+        connect(connection->inputHandler(), &KRdp::InputHandler::inputEvent, this, [this](std::shared_ptr<QInputEvent> event) {
+            if (allowRemoteControl) {
+                session->sendEvent(event);
+            }
+        });
         connect(connection->clipboard(), &KRdp::Clipboard::clientDataChanged, session.get(), [clipboard = connection->clipboard(), this]() {
             session->setClipboardData(clipboard->getClipboard());
         });
-        connect(connection->displayControl(), &KRdp::DisplayControl::requestedScreenSizeChanged, connection->videoStream(), &KRdp::VideoStream::setRequestedSize);
+
+        m_resizeDebounceTimer.setSingleShot(true);
+        connect(&m_resizeDebounceTimer, &QTimer::timeout, this, [this]() {
+            applyRequestedScreenSize(m_pendingResizeSize);
+        });
+
+        connect(connection->displayControl(), &KRdp::DisplayControl::requestedScreenSizeChanged, this, [this](const QSize &size) {
+            queueRequestedScreenSize(size);
+        });
+
+        if (connection->videoStream()->requestedSize().isValid()) {
+            queueRequestedScreenSize(connection->videoStream()->requestedSize());
+        }
 
         connect(connection, &QObject::destroyed, this, &SessionWrapper::onConnectionDestroyed);
+    }
+
+    void queueRequestedScreenSize(const QSize &size)
+    {
+        if (!size.isValid() || size.isEmpty()) {
+            return;
+        }
+        const QSize alignedSize(size.width() & ~1, size.height() & ~1);
+        if (alignedSize.isEmpty() || alignedSize == m_lastAppliedSize) {
+            return;
+        }
+
+        m_pendingResizeSize = alignedSize;
+        if (!m_lastAppliedSize.isValid()) {
+            // Initial layout on connection: apply immediately without delay
+            m_resizeDebounceTimer.stop();
+            applyRequestedScreenSize(m_pendingResizeSize);
+        } else {
+            // Interactive resize: debounce to avoid rapid back-to-back encoder re-inits
+            constexpr auto kResizeDebounceInterval = std::chrono::milliseconds(150);
+            m_resizeDebounceTimer.start(kResizeDebounceInterval);
+        }
+    }
+
+    void applyRequestedScreenSize(const QSize &size)
+    {
+        if (!size.isValid() || size.isEmpty() || size == m_lastAppliedSize) {
+            return;
+        }
+        m_lastAppliedSize = size;
+
+        if (connection) {
+            connection->videoStream()->setRequestedSize(size);
+        }
+
+        QDBusMessage msg = QDBusMessage::createMethodCall(QStringLiteral("org.kde.KWin"),
+                                                          QStringLiteral("/KWin"),
+                                                          QStringLiteral("org.kde.KWin"),
+                                                          QStringLiteral("resizeVirtualOutput"));
+        msg << QString() << size.width() << size.height();
+        QDBusConnection::sessionBus().asyncCall(msg);
     }
 
     void onCursorUpdate(const PipeWireCursor &cursor)
@@ -92,10 +152,21 @@ public:
     Q_SIGNAL void sessionError();
     Q_SIGNAL void connectionDestroyed(SessionWrapper *wrapper);
 
+    void disconnectClient()
+    {
+        if (connection) {
+            connection->close(KRdp::RdpConnection::CloseReason::UserLogoff);
+        }
+    }
+
     std::unique_ptr<KRdp::AbstractSession> session;
     QPointer<KRdp::RdpConnection> connection;
     KStatusNotifierItem *m_sni;
     bool m_sessionStarted = false;
+    bool allowRemoteControl = true;
+    QTimer m_resizeDebounceTimer;
+    QSize m_pendingResizeSize;
+    QSize m_lastAppliedSize;
 };
 
 SessionController::SessionController(KRdp::Server *server, SessionType sessionType)
@@ -105,17 +176,13 @@ SessionController::SessionController(KRdp::Server *server, SessionType sessionTy
     connect(m_server, &KRdp::Server::newConnectionCreated, this, &SessionController::onNewConnection);
     // Status notification item
     m_sni = new KStatusNotifierItem(u"krdpserver"_s, this);
-    auto menu = new QMenu(u"quitMenu"_s);
-    // Disable default quit button since it has confirmation dialog
     m_sni->setStandardActionsEnabled(false);
-    m_sni->setTitle(i18n("RDP Server"));
+    m_sni->setTitle(i18n("Remote Desktop Sharing"));
     m_sni->setIconByName(u"preferences-system-network-remote"_s);
     m_sni->setStatus(KStatusNotifierItem::Passive);
-    auto quitAction = new QAction(i18n("Quit"), menu);
-    quitAction->setIcon(QIcon::fromTheme(QStringLiteral("application-exit")));
-    connect(quitAction, &QAction::triggered, this, &SessionController::stopFromSNI);
-    menu->addAction(quitAction);
-    m_sni->setContextMenu(menu);
+    m_sni->setToolTipTitle(i18n("Remote Desktop"));
+    m_sni->setToolTipSubTitle(i18n("No active connections"));
+    updateTrayMenu();
 }
 
 SessionController::~SessionController() noexcept
@@ -124,8 +191,9 @@ SessionController::~SessionController() noexcept
 
 void SessionController::switchToGreeter()
 {
+    const QString seatPath = qEnvironmentVariable("XDG_SEAT_PATH", QStringLiteral("/org/freedesktop/DisplayManager/Seat0"));
     QDBusMessage message = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.DisplayManager"),
-                                                          QStringLiteral("/org/freedesktop/DisplayManager/Seat0"),
+                                                          seatPath,
                                                           QStringLiteral("org.freedesktop.DisplayManager.Seat"),
                                                           QStringLiteral("SwitchToGreeter"));
 
@@ -241,9 +309,17 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
                                             }),
                              m_wrappers.end());
 
-            if (m_wrappers.empty() && m_operatingMode == OperationMode::RemoteAccess) {
-                setSessionLocked(true);
+            if (m_wrappers.empty()) {
+                m_sni->setStatus(KStatusNotifierItem::Passive);
+                m_sni->setToolTipTitle(i18n("Remote Desktop"));
+                m_sni->setToolTipSubTitle(i18n("No active connections"));
+                m_sni->showMessage(i18n("Remote Desktop Sharing"), i18n("Remote desktop session ended"), QStringLiteral("preferences-system-network-remote"));
+
+                if (m_operatingMode == OperationMode::RemoteAccess) {
+                    setSessionLocked(true);
+                }
             }
+            updateTrayMenu();
         });
 
         connect(wrapper.get(), &SessionWrapper::sessionError, this, [newConnection] {
@@ -252,7 +328,61 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
 
         wrapper->session->start();
         m_wrappers.push_back(std::move(wrapper));
+
+        m_sni->setStatus(KStatusNotifierItem::Active);
+        m_sni->setToolTipTitle(i18n("Screen is being shared"));
+
+        const QString user = newConnection->username();
+        const QString addr = newConnection->clientAddress();
+        const QString clientInfo = user.isEmpty() ? addr : QStringLiteral("%1 (%2)").arg(user, addr);
+        m_sni->setToolTipSubTitle(i18n("Connected: %1", clientInfo));
+
+        m_sni->showMessage(i18n("Remote Desktop Sharing"), i18n("Remote user connected: %1", clientInfo), QStringLiteral("preferences-system-network-remote"));
+
+        updateTrayMenu();
     });
+}
+
+void SessionController::updateTrayMenu()
+{
+    auto menu = new QMenu();
+
+    if (m_wrappers.empty()) {
+        auto statusAction = menu->addAction(i18n("No active connections"));
+        statusAction->setEnabled(false);
+    } else {
+        for (const auto &wrapper : m_wrappers) {
+            if (!wrapper->connection) {
+                continue;
+            }
+            const QString user = wrapper->connection->username();
+            const QString addr = wrapper->connection->clientAddress();
+            const QString clientLabel = user.isEmpty() ? addr : QStringLiteral("%1 (%2)").arg(user, addr);
+
+            auto headerAction = menu->addAction(i18n("Client: %1", clientLabel));
+            headerAction->setEnabled(false);
+
+            auto controlAction = menu->addAction(i18n("Allow Remote Control"));
+            controlAction->setCheckable(true);
+            controlAction->setChecked(wrapper->allowRemoteControl);
+            connect(controlAction, &QAction::toggled, wrapper.get(), [wrapperPtr = wrapper.get()](bool checked) {
+                wrapperPtr->allowRemoteControl = checked;
+            });
+
+            auto disconnectAction = menu->addAction(QIcon::fromTheme(QStringLiteral("network-disconnect")), i18n("Disconnect Client"));
+            connect(disconnectAction, &QAction::triggered, wrapper.get(), [wrapperPtr = wrapper.get()]() {
+                wrapperPtr->disconnectClient();
+            });
+
+            menu->addSeparator();
+        }
+    }
+
+    menu->addSeparator();
+    auto stopAction = menu->addAction(QIcon::fromTheme(QStringLiteral("application-exit")), i18n("Stop Sharing Service"));
+    connect(stopAction, &QAction::triggered, this, &SessionController::stopFromSNI);
+
+    m_sni->setContextMenu(menu);
 }
 
 void SessionController::stopFromSNI()

@@ -55,6 +55,29 @@ public:
     void stop();
 
     /**
+     * Initialise the server without starting to listen for incoming connections.
+     *
+     * This verifies the TLS settings and creates the shared FreeRDP settings
+     * object required by every @c RdpConnection. It must be called before a
+     * connection is adopted via @c adoptConnection(), for example when
+     * running as the destination of a handover.
+     *
+     * @return @c true if initialisation succeeded.
+     */
+    bool initialize();
+
+    /**
+     * Start handling an existing socket.
+     *
+     * This is used when a socket has been received out-of-band, for example
+     * as the fd passed over D-Bus during a remote login handover, instead of
+     * listening for new incoming connections.
+     *
+     * \param handle An already connected socket.
+     */
+    void adoptConnection(qintptr handle);
+
+    /**
      * The host address to listen on.
      *
      * Set this to an appropriate address for the server to listen on. Common
@@ -91,6 +114,18 @@ public:
     void setUsePAMAuthentication(bool usePAM);
 
     /**
+     * Additional system users allowed to authenticate via PAM.
+     */
+    QStringList allowedSystemUsers() const;
+    void setAllowedSystemUsers(const QStringList &users);
+
+    /**
+     * System user groups allowed to authenticate via PAM.
+     */
+    QStringList allowedSystemGroups() const;
+    void setAllowedSystemGroups(const QStringList &groups);
+
+    /**
      * The path of a certificate file to use for encrypting communications.
      *
      * This is required to be set to a valid file, as the RDP login process only
@@ -122,6 +157,8 @@ protected:
     void incomingConnection(qintptr handle) override;
 
 private:
+    void createConnection(qintptr handle);
+
     friend class RdpConnection;
     rdp_settings *rdpSettings() const;
 
