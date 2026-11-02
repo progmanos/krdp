@@ -111,13 +111,6 @@ public:
         if (connection) {
             connection->videoStream()->setRequestedSize(size);
         }
-
-        QDBusMessage msg = QDBusMessage::createMethodCall(QStringLiteral("org.kde.KWin"),
-                                                          QStringLiteral("/KWin"),
-                                                          QStringLiteral("org.kde.KWin"),
-                                                          QStringLiteral("resizeVirtualOutput"));
-        msg << QString() << size.width() << size.height();
-        QDBusConnection::sessionBus().asyncCall(msg);
     }
 
     void onCursorUpdate(const PipeWireCursor &cursor)
