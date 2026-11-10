@@ -16,6 +16,16 @@
 
 using namespace Qt::StringLiterals;
 
+namespace
+{
+inline constexpr auto kKWinService = "org.kde.KWin"_L1;
+inline constexpr auto kKWinRemoteDesktopPath = "/org/kde/KWin/EIS/RemoteDesktop"_L1;
+inline constexpr auto kKWinRemoteDesktopInterface = "org.kde.KWin.EIS.RemoteDesktop"_L1;
+inline constexpr auto kConnectToEisMethod = "connectToEIS"_L1;
+inline constexpr auto kDisconnectMethod = "disconnect"_L1;
+inline constexpr auto kVirtualOutputPrefix = "Virtual-"_L1;
+} // namespace
+
 namespace KRdp
 {
 
@@ -36,10 +46,10 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
     : AbstractSession()
     , d(std::make_unique<Private>())
 {
-    constexpr auto kwinService = "org.kde.KWin"_L1;
-    constexpr auto kwinRemoteDesktopPath = "/org/kde/KWin/EIS/RemoteDesktop"_L1;
-    constexpr auto kwinRemoteDesktopInterface = "org.kde.KWin.EIS.RemoteDesktop"_L1;
-    auto msg = QDBusMessage::createMethodCall(kwinService, kwinRemoteDesktopPath, kwinRemoteDesktopInterface, "connectToEIS"_L1);
+    auto msg = QDBusMessage::createMethodCall(kKWinService.toString(),
+                                              kKWinRemoteDesktopPath.toString(),
+                                              kKWinRemoteDesktopInterface.toString(),
+                                              kConnectToEisMethod.toString());
     msg.setArguments({7}); // Keyboard | Pointer | TouchScreen
     auto *watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(msg), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *watcher) {
@@ -61,10 +71,10 @@ PlasmaScreencastV1Session::PlasmaScreencastV1Session()
 PlasmaScreencastV1Session::~PlasmaScreencastV1Session()
 {
     if (d->eisCookie) {
-        constexpr auto kwinService = "org.kde.KWin"_L1;
-        constexpr auto kwinRemoteDesktopPath = "/org/kde/KWin/EIS/RemoteDesktop"_L1;
-        constexpr auto kwinRemoteDesktopInterface = "org.kde.KWin.EIS.RemoteDesktop"_L1;
-        auto msg = QDBusMessage::createMethodCall(kwinService, kwinRemoteDesktopPath, kwinRemoteDesktopInterface, QStringLiteral("disconnect"));
+        auto msg = QDBusMessage::createMethodCall(kKWinService.toString(),
+                                                  kKWinRemoteDesktopPath.toString(),
+                                                  kKWinRemoteDesktopInterface.toString(),
+                                                  kDisconnectMethod.toString());
         msg.setArguments({d->eisCookie});
         QDBusConnection::sessionBus().send(msg);
     }
@@ -76,7 +86,7 @@ void PlasmaScreencastV1Session::start()
     if (auto vm = virtualMonitor()) {
         d->request.reset(d->m_screencasting.createVirtualMonitorStream(vm->name, vm->size, vm->dpr, Screencasting::Metadata));
         // KWin prefixes virtual output names with "Virtual-"
-        d->mappingId = "Virtual-"_L1 + vm->name;
+        d->mappingId = kVirtualOutputPrefix + vm->name;
     } else if (const auto streamIndex = activeStream()) {
         if (*streamIndex >= qApp->screens().size()) {
             qCWarning(KRDP) << "Invalid monitor index" << *streamIndex;

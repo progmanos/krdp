@@ -39,13 +39,6 @@ K_PLUGIN_FACTORY_WITH_JSON(KRDPServerConfigFactory, "kcm_krdpserver.json", regis
 
 static const char *const qmlUri = "org.kde.private.kcms.krdpserver";
 static const QString passwordServiceName = QLatin1StringView("KRDP");
-static const QString dbusSystemdDestination = u"org.freedesktop.systemd1"_s;
-static const QString dbusSystemdPath = u"/org/freedesktop/systemd1"_s;
-static const QString dbusKrdpServerServicePath = u"/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ekrdpserver_2eservice"_s;
-static const QString dbusDispatcherServicePath = u"/org/freedesktop/systemd1/unit/org_2ekde_2ekrdp_2ddispatcher_2eservice"_s;
-static const QString dbusSystemdUnitInterface = u"org.freedesktop.systemd1.Unit"_s;
-static const QString dbusSystemdManagerInterface = u"org.freedesktop.systemd1.Manager"_s;
-static const QString dbusSystemdPropertiesInterface = u"org.freedesktop.DBus.Properties"_s;
 
 KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
     : KQuickManagedConfigModule(parent, data)
@@ -63,18 +56,18 @@ KRDPServerConfig::KRDPServerConfig(QObject *parent, const KPluginMetaData &data)
         generateCertificate();
     }
 
-    QDBusConnection::sessionBus().connect(dbusSystemdDestination,
-                                          dbusKrdpServerServicePath,
-                                          dbusSystemdPropertiesInterface,
+    QDBusConnection::sessionBus().connect(KRdpKcm::DBus::SystemdDestination.toString(),
+                                          KRdpKcm::DBus::ServerServicePath.toString(),
+                                          KRdpKcm::DBus::SystemdPropertiesInterface.toString(),
                                           u"PropertiesChanged"_s,
                                           this,
                                           SLOT(servicePropertiesChanged()));
 
     loadDispatcherConfig();
 
-    QDBusConnection::systemBus().connect(dbusSystemdDestination,
-                                         dbusDispatcherServicePath,
-                                         dbusSystemdPropertiesInterface,
+    QDBusConnection::systemBus().connect(KRdpKcm::DBus::SystemdDestination.toString(),
+                                         KRdpKcm::DBus::DispatcherServicePath.toString(),
+                                         KRdpKcm::DBus::SystemdPropertiesInterface.toString(),
                                          u"PropertiesChanged"_s,
                                          this,
                                          SLOT(dispatcherServicePropertiesChanged()));
@@ -295,14 +288,14 @@ void KRDPServerConfig::toggleAutoconnect(const bool enabled)
 {
     qDebug(KRDPKCM) << "Setting KRDP Server service autostart on login to " << enabled << "over QDBus";
 
-    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination,
-                                              dbusSystemdPath,
-                                              dbusSystemdManagerInterface,
-                                              enabled ? u"EnableUnitFiles"_s : u"DisableUnitFiles"_s);
+    auto msg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                              KRdpKcm::DBus::SystemdPath.toString(),
+                                              KRdpKcm::DBus::SystemdManagerInterface.toString(),
+                                              enabled ? KRdpKcm::DBus::MethodEnableUnitFiles.toString() : KRdpKcm::DBus::MethodDisableUnitFiles.toString());
     if (enabled) {
-        msg.setArguments({QStringList(u"app-org.kde.krdpserver.service"_s), false, true});
+        msg.setArguments({QStringList(KRdpKcm::Service::ServerServiceName.toString()), false, true});
     } else {
-        msg.setArguments({QStringList(u"app-org.kde.krdpserver.service"_s), false});
+        msg.setArguments({QStringList(KRdpKcm::Service::ServerServiceName.toString()), false});
     }
     QDBusConnection::sessionBus().asyncCall(msg);
 
@@ -313,9 +306,12 @@ void KRDPServerConfig::toggleAutoconnect(const bool enabled)
 
 void KRDPServerConfig::toggleServer(const bool enabled)
 {
-    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdUnitInterface, enabled ? u"Start"_s : u"Stop"_s);
+    auto msg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                              KRdpKcm::DBus::ServerServicePath.toString(),
+                                              KRdpKcm::DBus::SystemdUnitInterface.toString(),
+                                              enabled ? u"Start"_s : u"Stop"_s);
 
-    msg.setArguments({u"replace"_s});
+    msg.setArguments({KRdpKcm::DBus::ModeReplace.toString()});
     qDebug(KRDPKCM) << "Toggling KRDP Server to " << enabled << "over QDBus";
     QDBusConnection::sessionBus().asyncCall(msg);
 
@@ -333,8 +329,11 @@ void KRDPServerConfig::restartServer()
         return;
     }
     qDebug(KRDPKCM) << "Restarting KRDP Server";
-    auto restartMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdUnitInterface, u"Restart"_s);
-    restartMsg.setArguments({u"replace"_s});
+    auto restartMsg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                                     KRdpKcm::DBus::ServerServicePath.toString(),
+                                                     KRdpKcm::DBus::SystemdUnitInterface.toString(),
+                                                     u"Restart"_s);
+    restartMsg.setArguments({KRdpKcm::DBus::ModeReplace.toString()});
     auto pendingCall = QDBusConnection::sessionBus().asyncCall(restartMsg);
     auto watcher = new QDBusPendingCallWatcher(pendingCall, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [&](QDBusPendingCallWatcher *w) {
@@ -396,8 +395,11 @@ void KRDPServerConfig::generateCertificate()
 
 void KRDPServerConfig::updateServerStatus()
 {
-    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdPropertiesInterface, u"Get"_s);
-    msg.setArguments({u"org.freedesktop.systemd1.Unit"_s, u"ActiveState"_s});
+    auto msg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                              KRdpKcm::DBus::ServerServicePath.toString(),
+                                              KRdpKcm::DBus::SystemdPropertiesInterface.toString(),
+                                              KRdpKcm::DBus::MethodGet.toString());
+    msg.setArguments({KRdpKcm::DBus::SystemdUnitInterface.toString(), u"ActiveState"_s});
 
     QDBusPendingCall pcall = QDBusConnection::sessionBus().asyncCall(msg);
     auto watcher = new QDBusPendingCallWatcher(pcall, this);
@@ -408,15 +410,18 @@ void KRDPServerConfig::updateServerStatus()
         if (replyString == "active"_L1 || replyString == "reloading"_L1) {
             setServerStatus(SystemdService::Status::Running);
         } else if (replyString == "failed"_L1) {
-            auto invocationIdMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusKrdpServerServicePath, dbusSystemdPropertiesInterface, u"Get"_s);
-            invocationIdMsg.setArguments({u"org.freedesktop.systemd1.Unit"_s, u"InvocationID"_s});
+            auto invocationIdMsg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                                                  KRdpKcm::DBus::ServerServicePath.toString(),
+                                                                  KRdpKcm::DBus::SystemdPropertiesInterface.toString(),
+                                                                  KRdpKcm::DBus::MethodGet.toString());
+            invocationIdMsg.setArguments({KRdpKcm::DBus::SystemdUnitInterface.toString(), u"InvocationID"_s});
 
             QDBusPendingCall pcall = QDBusConnection::sessionBus().asyncCall(invocationIdMsg);
             auto idWatcher = new QDBusPendingCallWatcher(pcall, this);
             connect(idWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
                 QDBusPendingReply<QDBusVariant> reply(*w);
                 const auto replyString = QString::fromUtf8(reply.value().variant().toByteArray().toHex());
-                setErrorMessage(getLastJournalEntries(u"app-org.kde.krdpserver.service"_s, replyString).join("\n"_L1));
+                setErrorMessage(getLastJournalEntries(KRdpKcm::Service::ServerServiceName.toString(), replyString).join("\n"_L1));
             });
 
             setServerStatus(SystemdService::Status::Failed);
@@ -727,20 +732,23 @@ void KRDPServerConfig::loadDispatcherConfig()
     KConfig config(KRdpKcm::Defaults::ConfigPath.toString(), KConfig::SimpleConfig);
     KConfigGroup group = config.group(KRdpKcm::Defaults::ConfigGroupGeneral);
 
-    m_dispatcherListenAddress = group.readEntry("ListenAddress", KRdpKcm::Defaults::ListenAddress.toString());
-    m_dispatcherListenPort = group.readEntry("ListenPort", KRdpKcm::Defaults::Port);
-    m_dispatcherTerminateOnDisconnect = group.readEntry("TerminateOnDisconnect", true);
-    m_dispatcherAutogenerateCertificates = group.readEntry("AutogenerateCertificates", true);
-    m_dispatcherCertificate = group.readEntry("Certificate", KRdpKcm::Defaults::CertificatePath.toString());
-    m_dispatcherCertificateKey = group.readEntry("CertificateKey", KRdpKcm::Defaults::CertificateKeyPath.toString());
+    m_dispatcherListenAddress = group.readEntry(KRdpKcm::Defaults::EntryListenAddress, KRdpKcm::Defaults::ListenAddress.toString());
+    m_dispatcherListenPort = group.readEntry(KRdpKcm::Defaults::EntryListenPort, KRdpKcm::Defaults::Port);
+    m_dispatcherTerminateOnDisconnect = group.readEntry(KRdpKcm::Defaults::EntryTerminateOnDisconnect, true);
+    m_dispatcherAutogenerateCertificates = group.readEntry(KRdpKcm::Defaults::EntryAutogenerateCertificates, true);
+    m_dispatcherCertificate = group.readEntry(KRdpKcm::Defaults::EntryCertificate, KRdpKcm::Defaults::CertificatePath.toString());
+    m_dispatcherCertificateKey = group.readEntry(KRdpKcm::Defaults::EntryCertificateKey, KRdpKcm::Defaults::CertificateKeyPath.toString());
     m_dispatcherSettingsModified = false;
     Q_EMIT dispatcherSettingsChanged();
 }
 
 void KRDPServerConfig::updateDispatcherStatus()
 {
-    auto msg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusDispatcherServicePath, dbusSystemdPropertiesInterface, u"Get"_s);
-    msg.setArguments({u"org.freedesktop.systemd1.Unit"_s, u"ActiveState"_s});
+    auto msg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                              KRdpKcm::DBus::DispatcherServicePath.toString(),
+                                              KRdpKcm::DBus::SystemdPropertiesInterface.toString(),
+                                              KRdpKcm::DBus::MethodGet.toString());
+    msg.setArguments({KRdpKcm::DBus::SystemdUnitInterface.toString(), u"ActiveState"_s});
 
     QDBusPendingCall pcall = QDBusConnection::systemBus().asyncCall(msg);
     auto watcher = new QDBusPendingCallWatcher(pcall, this);
@@ -752,15 +760,18 @@ void KRDPServerConfig::updateDispatcherStatus()
             setRemoteLoginStatus(SystemdService::Status::Running);
         } else if (replyString == "failed"_L1) {
             setRemoteLoginStatus(SystemdService::Status::Failed);
-            auto invocationIdMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusDispatcherServicePath, dbusSystemdPropertiesInterface, u"Get"_s);
-            invocationIdMsg.setArguments({u"org.freedesktop.systemd1.Unit"_s, u"InvocationID"_s});
+            auto invocationIdMsg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                                                  KRdpKcm::DBus::DispatcherServicePath.toString(),
+                                                                  KRdpKcm::DBus::SystemdPropertiesInterface.toString(),
+                                                                  KRdpKcm::DBus::MethodGet.toString());
+            invocationIdMsg.setArguments({KRdpKcm::DBus::SystemdUnitInterface.toString(), u"InvocationID"_s});
 
             QDBusPendingCall idCall = QDBusConnection::systemBus().asyncCall(invocationIdMsg);
             auto idWatcher = new QDBusPendingCallWatcher(idCall, this);
             connect(idWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *iw) {
                 QDBusPendingReply<QDBusVariant> idReply(*iw);
                 const auto invId = QString::fromUtf8(idReply.value().variant().toByteArray().toHex());
-                setRemoteLoginErrorMessage(getLastJournalEntries(u"org.kde.krdp-dispatcher.service"_s, invId).join(u"\n"_s));
+                setRemoteLoginErrorMessage(getLastJournalEntries(KRdpKcm::Service::DispatcherServiceName.toString(), invId).join(u"\n"_s));
                 iw->deleteLater();
             });
         } else if (replyString == "inactive"_L1) {
@@ -771,8 +782,11 @@ void KRDPServerConfig::updateDispatcherStatus()
         w->deleteLater();
     });
 
-    auto stateMsg = QDBusMessage::createMethodCall(dbusSystemdDestination, dbusSystemdPath, dbusSystemdManagerInterface, u"GetUnitFileState"_s);
-    stateMsg.setArguments({u"org.kde.krdp-dispatcher.service"_s});
+    auto stateMsg = QDBusMessage::createMethodCall(KRdpKcm::DBus::SystemdDestination.toString(),
+                                                   KRdpKcm::DBus::SystemdPath.toString(),
+                                                   KRdpKcm::DBus::SystemdManagerInterface.toString(),
+                                                   KRdpKcm::DBus::MethodGetUnitFileState.toString());
+    stateMsg.setArguments({KRdpKcm::Service::DispatcherServiceName.toString()});
     QDBusPendingCall stateCall = QDBusConnection::systemBus().asyncCall(stateMsg);
     auto stateWatcher = new QDBusPendingCallWatcher(stateCall, this);
     connect(stateWatcher, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {

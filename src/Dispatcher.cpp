@@ -21,6 +21,8 @@
 #include <QSocketNotifier>
 #include <QTimer>
 
+#include <KUser>
+
 #include <freerdp/freerdp.h>
 #include <winpr/ssl.h>
 
@@ -33,14 +35,55 @@ using namespace Qt::StringLiterals;
 
 namespace
 {
-constexpr auto kDBusService = "org.kde.krdp.Dispatcher";
-constexpr auto kDBusObjectPath = "/org/kde/krdp/Dispatcher";
-constexpr auto kDBusInterface = "org.kde.krdp.Dispatcher";
+constexpr auto kDBusService = "org.kde.krdp.Dispatcher"_L1;
+constexpr auto kDBusObjectPath = "/org/kde/krdp/Dispatcher"_L1;
+constexpr auto kDBusInterface = "org.kde.krdp.Dispatcher"_L1;
+constexpr auto kSignalHandoverRequested = "HandoverRequested"_L1;
+constexpr auto kSignalTakeClientReady = "TakeClientReady"_L1;
+constexpr auto kSignalRedirectClient = "RedirectClient"_L1;
+constexpr auto kSignalClientConnected = "ClientConnected"_L1;
+constexpr auto kSignalClientDisconnected = "ClientDisconnected"_L1;
+
+constexpr auto kErrUnknownRemoteId = "Unknown remote id %1"_L1;
+constexpr auto kErrClientDisconnected = "Remote client %1 has disconnected"_L1;
+constexpr auto kErrCallerUidUndetermined = "Unable to determine caller UID for remote id %1"_L1;
+constexpr auto kErrCallerUidNotAuthorized = "Caller UID %1 is not authorized to claim remote id %2"_L1;
+constexpr auto kErrOnlyGreeterMayClaim = "Only the display manager greeter may claim unauthenticated remote id %1"_L1;
+constexpr auto kErrNoSessionOwnsClient = "No session currently owns remote client %1"_L1;
+constexpr auto kErrUnableToReadCertOrKey = "Unable to read system certificate or key"_L1;
+constexpr auto kErrCallerNotAuthorized = "Caller is not authorized to take over remote id %1"_L1;
+constexpr auto kErrClientNotReconnected = "Remote client %1 has not reconnected yet"_L1;
+constexpr auto kErrOnlyRootMayAuthorize = "Only root may authorize handover for remote id %1"_L1;
+constexpr auto kErrUnknownUser = "Unknown user %1"_L1;
+constexpr auto kErrOnlyRootMayTransfer = "Only root may transfer handover from %1 to %2"_L1;
+constexpr auto kErrUnknownOldRemoteId = "Unknown old remote id %1"_L1;
+constexpr auto kErrUnknownNewRemoteId = "Unknown new remote id %1"_L1;
+
+// Maximum time to wait for the initial X.224 Connection Request PDU after TCP
+// accept() before treating a partial/silent socket as a new client.
 constexpr auto kPeekTimeout = std::chrono::milliseconds(2000);
+// Maximum time between StartHandover (sending ServerRedirection) and the
+// target session calling TakeClient after the redirected client reconnects.
 constexpr auto kTakeClientTimeout = std::chrono::seconds(30);
+// An X.224 Connection Request PDU with an RDP routing token or mstshash cookie
+// is typically 40-120 bytes; 256 bytes comfortably captures the cookie header.
 constexpr size_t kPeekBufferSize = 256;
+constexpr qsizetype kDebugPeekPreviewLength = 32;
+
+// ITU-T Rec. T.123 / RFC 1006 Section 6 & [MS-RDPBCGR] 2.2.1.1 TPKT header:
+// 4 bytes: [version = 3, reserved = 0, length_hi (byte 2), length_lo (byte 3)].
 constexpr size_t kTpktHeaderSize = 4;
+constexpr size_t kTpktLengthHighByteIndex = 2;
+constexpr size_t kTpktLengthLowByteIndex = 3;
+constexpr int kBitsPerByte = 8;
 constexpr uint8_t kTpktVersion3 = 3;
+
+constexpr QByteArrayView kRoutingTokenPrefix = "Cookie: msts=";
+constexpr QByteArrayView kPlainCookiePrefix = "Cookie: mstshash=";
+constexpr QByteArrayView kCookieTerminator = "\r\n";
+
+constexpr uint kRootUid = 0;
+constexpr auto kGreeterUserName = "plasmalogin"_L1;
 }
 
 namespace KRdp
@@ -78,6 +121,11 @@ public:
         // UID of the session that called StartHandover, used to verify the
         // subsequent TakeClient call.
         uint dstUid = 0;
+        // UID authorized by the display manager (via AuthorizeHandover or
+        // TransferHandover) to claim this remoteId for a user session.
+        // UINT32_MAX indicates the client has not yet authenticated a user
+        // session (only the display manager greeter or root may claim it).
+        uint authorizedUid = UINT32_MAX;
 
         // Socket of a reconnected (redirected) client, waiting to be
         // transferred via TakeClient().
@@ -106,6 +154,12 @@ public:
             return UINT32_MAX;
         }
         return reply.value();
+    }
+
+    uint greeterUid() const
+    {
+        const KUser greeterUser(kGreeterUserName.toString());
+        return greeterUser.isValid() ? static_cast<uint>(greeterUser.userId().nativeId()) : UINT32_MAX;
     }
 
     void removeClient(RemoteClient *client)
@@ -249,12 +303,12 @@ bool Dispatcher::start()
         return false;
     }
 
-    if (!connection.registerService(QString::fromLatin1(kDBusService))) {
+    if (!connection.registerService(kDBusService.toString())) {
         qCCritical(KRDP) << "Could not register D-Bus service" << kDBusService;
         return false;
     }
 
-    if (!connection.registerObject(QString::fromLatin1(kDBusObjectPath), this)) {
+    if (!connection.registerObject(kDBusObjectPath.toString(), this)) {
         qCCritical(KRDP) << "Could not register D-Bus object" << kDBusObjectPath;
         return false;
     }
@@ -273,8 +327,8 @@ void Dispatcher::stop()
     close();
 
     if (auto connection = QDBusConnection::systemBus(); connection.isConnected()) {
-        connection.unregisterObject(QString::fromLatin1(kDBusObjectPath));
-        connection.unregisterService(QString::fromLatin1(kDBusService));
+        connection.unregisterObject(kDBusObjectPath.toString());
+        connection.unregisterService(kDBusService.toString());
     }
 
     for (auto *client : std::as_const(d->remoteClients)) {
@@ -360,17 +414,16 @@ void Dispatcher::tryPeek(qintptr handle)
     qCDebug(KRDP) << "tryPeek received" << bytesRead << "bytes";
     const QByteArray data(buffer, bytesRead);
     if (bytesRead > 0) {
-        qCDebug(KRDP) << "First bytes of incoming connection:" << QString::fromLatin1(data.left(32));
+        qCDebug(KRDP) << "First bytes of incoming connection:" << QString::fromLatin1(data.left(kDebugPeekPreviewLength));
     }
     const QByteArrayView view(data);
 
     // A redirected client presents the routing token after a "Cookie: msts="
     // prefix in its X.224 Connection Request.
-    constexpr QByteArrayView tokenPrefix("Cookie: msts=");
-    const auto tokenPos = view.indexOf(tokenPrefix);
+    const auto tokenPos = view.indexOf(kRoutingTokenPrefix);
     if (tokenPos >= 0) {
-        const auto valueStart = tokenPos + tokenPrefix.size();
-        const auto crlf = view.indexOf("\r\n", valueStart);
+        const auto valueStart = tokenPos + kRoutingTokenPrefix.size();
+        const auto crlf = view.indexOf(kCookieTerminator, valueStart);
         if (crlf > valueStart) {
             const auto token = QString::fromLatin1(view.mid(valueStart, crlf - valueStart));
             qCDebug(KRDP) << "Incoming connection with routing token:" << token;
@@ -383,8 +436,7 @@ void Dispatcher::tryPeek(qintptr handle)
     // A plain client presents a "Cookie: mstshash=" in its X.224 Connection
     // Request. If we can already see that, it is definitely a new (non
     // redirected) connection and we do not need to wait for the timeout.
-    constexpr auto plainPrefix = "Cookie: mstshash=";
-    if (view.indexOf(plainPrefix) >= 0) {
+    if (view.indexOf(kPlainCookiePrefix) >= 0) {
         qCDebug(KRDP) << "Incoming connection without routing token";
         cleanupPeek(handle);
         handleNewConnection(handle);
@@ -397,7 +449,8 @@ void Dispatcher::tryPeek(qintptr handle)
     // arrived without a routing token, treat it immediately as a new client.
     if (bytesRead >= static_cast<ssize_t>(kTpktHeaderSize)) {
         const auto version = static_cast<uint8_t>(buffer[0]);
-        const auto tpktLength = static_cast<qsizetype>((static_cast<uint8_t>(buffer[2]) << 8) | static_cast<uint8_t>(buffer[3]));
+        const auto tpktLength = static_cast<qsizetype>((static_cast<uint8_t>(buffer[kTpktLengthHighByteIndex]) << kBitsPerByte)
+                                                       | static_cast<uint8_t>(buffer[kTpktLengthLowByteIndex]));
         if (version != kTpktVersion3 || bytesRead >= std::min<qsizetype>(tpktLength, sizeof(buffer))) {
             qCDebug(KRDP) << "Complete X.224 Connection Request without routing token, treating as new client";
             cleanupPeek(handle);
@@ -504,17 +557,33 @@ QString Dispatcher::StartHandover(const QString &remoteId, const QString &userna
 {
     auto *client = d->findClient(remoteId);
     if (!client) {
-        sendErrorReply(QDBusError::UnknownObject, QStringLiteral("Unknown remote id %1").arg(remoteId));
+        sendErrorReply(QDBusError::UnknownObject, kErrUnknownRemoteId.toString().arg(remoteId));
         return {};
     }
 
     if (!client->connection && client->ownerName.isEmpty() && client->pendingSocket == -1) {
-        sendErrorReply(QDBusError::Disconnected, QStringLiteral("Remote client %1 has disconnected").arg(remoteId));
+        sendErrorReply(QDBusError::Disconnected, kErrClientDisconnected.toString().arg(remoteId));
         return {};
     }
 
     const auto callerService = message().service();
     const auto callerUid = d->callerUid(callerService);
+    if (callerUid == UINT32_MAX) {
+        sendErrorReply(QDBusError::AccessDenied, kErrCallerUidUndetermined.toString().arg(remoteId));
+        return {};
+    }
+
+    if (client->authorizedUid != UINT32_MAX) {
+        if (callerUid != client->authorizedUid && callerUid != kRootUid) {
+            sendErrorReply(QDBusError::AccessDenied, kErrCallerUidNotAuthorized.toString().arg(callerUid).arg(remoteId));
+            return {};
+        }
+    } else {
+        if (callerUid != kRootUid && callerUid != d->greeterUid()) {
+            sendErrorReply(QDBusError::AccessDenied, kErrOnlyGreeterMayClaim.toString().arg(remoteId));
+            return {};
+        }
+    }
 
     // The connection to the client is still held by the dispatcher: redirect
     // it ourselves.
@@ -529,7 +598,7 @@ QString Dispatcher::StartHandover(const QString &remoteId, const QString &userna
         // The client is currently owned by another session: ask that session
         // to redirect it.
         if (client->ownerName.isEmpty()) {
-            sendErrorReply(QDBusError::Failed, QStringLiteral("No session currently owns remote client %1").arg(remoteId));
+            sendErrorReply(QDBusError::Failed, kErrNoSessionOwnsClient.toString().arg(remoteId));
             return {};
         }
 
@@ -564,7 +633,7 @@ QString Dispatcher::StartHandover(const QString &remoteId, const QString &userna
     QFile certificateFile(QString::fromStdString(d->systemCertificate.string()));
     QFile keyFile(QString::fromStdString(d->systemCertificateKey.string()));
     if (!certificateFile.open(QIODevice::ReadOnly) || !keyFile.open(QIODevice::ReadOnly)) {
-        sendErrorReply(QDBusError::Failed, QStringLiteral("Unable to read system certificate or key"));
+        sendErrorReply(QDBusError::Failed, kErrUnableToReadCertOrKey.toString());
         return {};
     }
 
@@ -576,22 +645,22 @@ QDBusUnixFileDescriptor Dispatcher::TakeClient(const QString &remoteId)
 {
     auto *client = d->findClient(remoteId);
     if (!client) {
-        sendErrorReply(QDBusError::UnknownObject, QStringLiteral("Unknown remote id %1").arg(remoteId));
+        sendErrorReply(QDBusError::UnknownObject, kErrUnknownRemoteId.toString().arg(remoteId));
         return {};
     }
 
     if (client->dstName != message().service()) {
-        sendErrorReply(QDBusError::AccessDenied, QStringLiteral("Caller is not authorized to take over remote id %1").arg(remoteId));
+        sendErrorReply(QDBusError::AccessDenied, kErrCallerNotAuthorized.toString().arg(remoteId));
         return {};
     }
 
     if (client->dstUid != d->callerUid(message().service())) {
-        sendErrorReply(QDBusError::AccessDenied, QStringLiteral("Caller is not authorized to take over remote id %1").arg(remoteId));
+        sendErrorReply(QDBusError::AccessDenied, kErrCallerNotAuthorized.toString().arg(remoteId));
         return {};
     }
 
     if (client->pendingSocket == -1) {
-        sendErrorReply(QDBusError::Failed, QStringLiteral("Remote client %1 has not reconnected yet").arg(remoteId));
+        sendErrorReply(QDBusError::Failed, kErrClientNotReconnected.toString().arg(remoteId));
         return {};
     }
 
@@ -623,6 +692,83 @@ QDBusUnixFileDescriptor Dispatcher::TakeClient(const QString &remoteId)
     return descriptor;
 }
 
+void Dispatcher::AuthorizeHandover(const QString &remoteId, const QString &username)
+{
+    if (d->callerUid(message().service()) != kRootUid) {
+        sendErrorReply(QDBusError::AccessDenied, kErrOnlyRootMayAuthorize.toString().arg(remoteId));
+        return;
+    }
+
+    auto *client = d->findClient(remoteId);
+    if (!client) {
+        sendErrorReply(QDBusError::UnknownObject, kErrUnknownRemoteId.toString().arg(remoteId));
+        return;
+    }
+
+    const KUser targetUser(username);
+    if (!targetUser.isValid()) {
+        sendErrorReply(QDBusError::InvalidArgs, kErrUnknownUser.toString().arg(username));
+        return;
+    }
+
+    client->authorizedUid = static_cast<uint>(targetUser.userId().nativeId());
+    qCDebug(KRDP) << "Authorized UID" << client->authorizedUid << "(" << username << ") for handover of remote id:" << remoteId;
+}
+
+void Dispatcher::TransferHandover(const QString &oldRemoteId, const QString &newRemoteId)
+{
+    if (d->callerUid(message().service()) != kRootUid) {
+        sendErrorReply(QDBusError::AccessDenied, kErrOnlyRootMayTransfer.toString().arg(oldRemoteId, newRemoteId));
+        return;
+    }
+
+    if (oldRemoteId == newRemoteId) {
+        return;
+    }
+
+    auto *oldClient = d->findClient(oldRemoteId);
+    if (!oldClient) {
+        sendErrorReply(QDBusError::UnknownObject, kErrUnknownOldRemoteId.toString().arg(oldRemoteId));
+        return;
+    }
+
+    auto *newClient = d->findClient(newRemoteId);
+    if (!newClient) {
+        sendErrorReply(QDBusError::UnknownObject, kErrUnknownNewRemoteId.toString().arg(newRemoteId));
+        return;
+    }
+
+    const QString userSessionService = !oldClient->ownerName.isEmpty() ? oldClient->ownerName : oldClient->dstName;
+    if (userSessionService.isEmpty()) {
+        sendErrorReply(QDBusError::Failed, kErrNoSessionOwnsClient.toString().arg(oldRemoteId));
+        return;
+    }
+
+    newClient->authorizedUid = (oldClient->authorizedUid != UINT32_MAX) ? oldClient->authorizedUid : d->callerUid(userSessionService);
+
+    qCDebug(KRDP) << "Transferring handover from" << oldRemoteId << "to" << newRemoteId << "for session" << userSessionService
+                  << "(authorized UID:" << newClient->authorizedUid << ")";
+
+    // Retire oldClient without emitting ClientDisconnected so the user's
+    // active session is not torn down during the transfer.
+    if (oldClient->pendingSocket != -1) {
+        ::close(oldClient->pendingSocket);
+        oldClient->pendingSocket = -1;
+    }
+    d->removeClient(oldClient);
+
+    d->serviceWatcher->addWatchedService(userSessionService);
+    emitHandoverRequested(userSessionService, newRemoteId);
+}
+
+void Dispatcher::emitHandoverRequested(const QString &destination, const QString &remoteId)
+{
+    QDBusMessage message =
+        QDBusMessage::createTargetedSignal(destination, kDBusObjectPath.toString(), kDBusInterface.toString(), kSignalHandoverRequested.toString());
+    message.setArguments({remoteId});
+    QDBusConnection::systemBus().send(message);
+}
+
 void Dispatcher::emitTakeClientReady(const QString &remoteId)
 {
     auto *client = d->findClient(remoteId);
@@ -630,36 +776,30 @@ void Dispatcher::emitTakeClientReady(const QString &remoteId)
         return;
     }
 
-    QDBusMessage message = QDBusMessage::createTargetedSignal(client->dstName,
-                                                              QString::fromLatin1(kDBusObjectPath),
-                                                              QString::fromLatin1(kDBusInterface),
-                                                              QStringLiteral("TakeClientReady"));
+    QDBusMessage message =
+        QDBusMessage::createTargetedSignal(client->dstName, kDBusObjectPath.toString(), kDBusInterface.toString(), kSignalTakeClientReady.toString());
     message.setArguments({remoteId});
     QDBusConnection::systemBus().send(message);
 }
 
 void Dispatcher::emitRedirectClient(const QString &destination, const QString &remoteId, const QString &username, const QString &password)
 {
-    QDBusMessage message = QDBusMessage::createTargetedSignal(destination,
-                                                              QString::fromLatin1(kDBusObjectPath),
-                                                              QString::fromLatin1(kDBusInterface),
-                                                              QStringLiteral("RedirectClient"));
+    QDBusMessage message =
+        QDBusMessage::createTargetedSignal(destination, kDBusObjectPath.toString(), kDBusInterface.toString(), kSignalRedirectClient.toString());
     message.setArguments({remoteId, username, password});
     QDBusConnection::systemBus().send(message);
 }
 
 void Dispatcher::emitClientConnected(const QString &remoteId)
 {
-    QDBusMessage message =
-        QDBusMessage::createSignal(QString::fromLatin1(kDBusObjectPath), QString::fromLatin1(kDBusInterface), QStringLiteral("ClientConnected"));
+    QDBusMessage message = QDBusMessage::createSignal(kDBusObjectPath.toString(), kDBusInterface.toString(), kSignalClientConnected.toString());
     message.setArguments({remoteId});
     QDBusConnection::systemBus().send(message);
 }
 
 void Dispatcher::emitClientDisconnected(const QString &remoteId)
 {
-    QDBusMessage message =
-        QDBusMessage::createSignal(QString::fromLatin1(kDBusObjectPath), QString::fromLatin1(kDBusInterface), QStringLiteral("ClientDisconnected"));
+    QDBusMessage message = QDBusMessage::createSignal(kDBusObjectPath.toString(), kDBusInterface.toString(), kSignalClientDisconnected.toString());
     message.setArguments({remoteId});
     QDBusConnection::systemBus().send(message);
 }

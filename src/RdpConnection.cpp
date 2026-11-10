@@ -19,6 +19,7 @@
 
 #include <QFile>
 #include <QHostAddress>
+#include <QScopeGuard>
 #include <QTcpSocket>
 #include <QTemporaryFile>
 #include <QThread>
@@ -44,6 +45,35 @@
 #include <KUser>
 
 #include "krdp_logging.h"
+
+using namespace Qt::StringLiterals;
+
+namespace
+{
+constexpr auto kGreeterUserName = "plasmalogin"_L1;
+
+QString resolvePeerAddress(qintptr socketHandle, const char *peerHostname)
+{
+    if (peerHostname && peerHostname[0] != '\0') {
+        return QString::fromUtf8(peerHostname);
+    }
+    if (socketHandle < 0) {
+        return {};
+    }
+    sockaddr_storage storage{};
+    socklen_t len = sizeof(storage);
+    if (::getpeername(static_cast<int>(socketHandle), reinterpret_cast<sockaddr *>(&storage), &len) != 0) {
+        return {};
+    }
+    const QHostAddress hostAddr(reinterpret_cast<const sockaddr *>(&storage));
+    bool isIpv4 = false;
+    const quint32 ipv4 = hostAddr.toIPv4Address(&isIpv4);
+    if (isIpv4) {
+        return QHostAddress(ipv4).toString();
+    }
+    return hostAddr.toString();
+}
+}
 
 namespace KRdp
 {
@@ -121,10 +151,17 @@ static int pamAuthenticate(const QString &user, const QString &password)
     int pam_status = 0;
     RdpConnectionPamHandle info = {0};
 
-    info.appdata.user = user.toLatin1();
-    info.appdata.password = password.toLatin1();
+    info.appdata.user = user.toUtf8();
+    info.appdata.password = password.toUtf8();
     info.pamc.conv = &pam_conv;
     info.pamc.appdata_ptr = &info.appdata;
+
+    const auto cleanup = qScopeGuard([&info, &pam_status]() {
+        info.appdata.password.fill('\0');
+        if (info.handle) {
+            pam_end(info.handle, pam_status);
+        }
+    });
 
     pam_status = pam_start("login", 0, &info.pamc, &info.handle);
 
@@ -342,6 +379,9 @@ void RdpConnection::close(RdpConnection::CloseReason reason)
     case CloseReason::UserLogoff:
         freerdp_set_error_info(d->peer->context->rdp, ERRINFO_LOGOFF_BY_USER);
         break;
+    case CloseReason::ReplacedByOtherConnection:
+        freerdp_set_error_info(d->peer->context->rdp, ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION);
+        break;
     case CloseReason::None:
         break;
     }
@@ -424,6 +464,7 @@ void RdpConnection::initialize()
     d->peer = freerdp_peer_new(d->socketHandle);
     if (!d->peer) {
         qCWarning(KRDP) << "Failed to create peer";
+        setState(State::Closed);
         return;
     }
 
@@ -436,6 +477,7 @@ void RdpConnection::initialize()
     auto result = freerdp_peer_context_new_ex(d->peer, d->server->rdpSettings());
     if (!result) {
         qCWarning(KRDP) << "Failed to create peer context";
+        setState(State::Closed);
         return;
     }
 
@@ -461,13 +503,15 @@ void RdpConnection::initialize()
     auto certificate = freerdp_certificate_new_from_file(d->server->tlsCertificate().string().data());
     if (!certificate) {
         qCWarning(KRDP) << "Could not read certificate file" << d->server->tlsCertificate().string();
+        setState(State::Closed);
         return;
     }
     freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerCertificate, certificate, 1);
 
     auto key = freerdp_key_new_from_file(d->server->tlsCertificateKey().string().data());
     if (!key) {
-        qCWarning(KRDP) << "Could not read certificate file" << d->server->tlsCertificate().string();
+        qCWarning(KRDP) << "Could not read certificate key file" << d->server->tlsCertificateKey().string();
+        setState(State::Closed);
         return;
     }
     freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key, 1);
@@ -514,7 +558,6 @@ void RdpConnection::initialize()
     freerdp_settings_set_bool(settings, FreeRDP_SupportMonitorLayoutPdu, true);
     freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, true);
 
-
     d->peer->Capabilities = peerCapabilities;
     d->peer->Activate = peerActivate;
     d->peer->PostConnect = peerPostConnect;
@@ -529,6 +572,7 @@ void RdpConnection::initialize()
 
     if (!d->peer->Initialize(d->peer)) {
         qCWarning(KRDP) << "Unable to initialize peer";
+        setState(State::Closed);
         return;
     }
 
@@ -542,6 +586,7 @@ void RdpConnection::initialize()
     d->redirectionEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
     if (!d->stopEvent || !d->redirectionEvent) {
         qCWarning(KRDP) << "Unable to create session events";
+        setState(State::Closed);
         return;
     }
 
@@ -679,7 +724,7 @@ bool RdpConnection::onCapabilities()
         freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
     }
 
-    if (freerdp_settings_get_uint32(settings,FreeRDP_PointerCacheSize) <= 0) {
+    if (freerdp_settings_get_uint32(settings, FreeRDP_PointerCacheSize) <= 0) {
         qCWarning(KRDP) << "Client doesn't support pointer caching, aborting";
         return false;
     }
@@ -746,13 +791,13 @@ bool RdpConnection::onPostConnect()
     const QString password = QString::fromUtf8(freerdp_settings_get_string(settings, FreeRDP_Password));
 
     d->username = username;
-    d->clientAddress = QString::fromUtf8(d->peer->hostname);
+    d->clientAddress = resolvePeerAddress(d->socketHandle, d->peer->hostname);
 
     if (d->server->usePAMAuthentication()) {
         bool systemUserAllowed = false;
         const QString currentUser = KUser().loginName();
 
-        if (currentUser == QStringLiteral("plasmalogin")) {
+        if (currentUser == kGreeterUserName) {
             systemUserAllowed = true;
         } else if (username == currentUser) {
             systemUserAllowed = true;
@@ -796,7 +841,12 @@ bool RdpConnection::onPostConnect()
         }
         return false;
     } else {
-        // In the NLA case the user has been authorised against the SAM database
+        // In the NLA case the user has been authorised against the SAM database.
+        // Immediately remove the temporary SAM file so the one-time password hash
+        // does not remain in tmpfs for the rest of the session.
+        if (d->samFile.exists()) {
+            d->samFile.remove();
+        }
         return true;
     }
 }

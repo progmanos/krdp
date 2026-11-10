@@ -45,6 +45,8 @@ public:
 
 private:
     void requestHandover();
+    void logoutSession();
+    void clearOneTimeCredentials();
     void applyCertificate(const QString &certificate, const QString &key);
     void onTakeClientReady(const QString &remoteId);
     void onRedirectClient(const QString &remoteId, const QString &username, const QString &password);

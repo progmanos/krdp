@@ -22,6 +22,8 @@ namespace
 {
 bool generateCertificateIfMissing(const QString &certPath, const QString &keyPath)
 {
+    using namespace KRdpKcm;
+
     if (QFile::exists(certPath) && QFile::exists(keyPath)) {
         return true;
     }
@@ -29,20 +31,20 @@ bool generateCertificateIfMissing(const QString &certPath, const QString &keyPat
     const QFileInfo certInfo(certPath);
     QDir().mkpath(certInfo.absolutePath());
 
-    const int exitCode = QProcess::execute(QStringLiteral("openssl"),
-                                           {QStringLiteral("req"),
-                                            QStringLiteral("-nodes"),
-                                            QStringLiteral("-x509"),
-                                            QStringLiteral("-newkey"),
-                                            QStringLiteral("rsa:2048"),
-                                            QStringLiteral("-keyout"),
+    const int exitCode = QProcess::execute(Auth::OpenSslBinary.toString(),
+                                           {Auth::OpenSslReqCmd.toString(),
+                                            Auth::OpenSslNodesFlag.toString(),
+                                            Auth::OpenSslX509Flag.toString(),
+                                            Auth::OpenSslNewKeyFlag.toString(),
+                                            Auth::OpenSslRsa2048.toString(),
+                                            Auth::OpenSslKeyOutFlag.toString(),
                                             keyPath,
-                                            QStringLiteral("-out"),
+                                            Auth::OpenSslOutFlag.toString(),
                                             certPath,
-                                            QStringLiteral("-days"),
-                                            QStringLiteral("3650"),
-                                            QStringLiteral("-subj"),
-                                            QStringLiteral("/CN=krdp-dispatcher")});
+                                            Auth::OpenSslDaysFlag.toString(),
+                                            Auth::OpenSslValidityDays.toString(),
+                                            Auth::OpenSslSubjFlag.toString(),
+                                            Auth::OpenSslSubjValue.toString()});
 
     if (exitCode == 0) {
         QFile::setPermissions(keyPath, QFile::ReadOwner | QFile::WriteOwner);
@@ -63,23 +65,23 @@ ActionReply KRDPServerAuthHelper::save(const QVariantMap &args)
     KConfigGroup group = config.group(Defaults::ConfigGroupGeneral);
 
     if (args.contains(Auth::KeyListenAddress.toString())) {
-        group.writeEntry("ListenAddress", args.value(Auth::KeyListenAddress.toString()).toString());
+        group.writeEntry(Defaults::EntryListenAddress, args.value(Auth::KeyListenAddress.toString()).toString());
     }
     if (args.contains(Auth::KeyListenPort.toString())) {
-        group.writeEntry("ListenPort", args.value(Auth::KeyListenPort.toString()).toInt());
+        group.writeEntry(Defaults::EntryListenPort, args.value(Auth::KeyListenPort.toString()).toInt());
     }
     if (args.contains(Auth::KeyTerminateOnDisconnect.toString())) {
-        group.writeEntry("TerminateOnDisconnect", args.value(Auth::KeyTerminateOnDisconnect.toString()).toBool());
+        group.writeEntry(Defaults::EntryTerminateOnDisconnect, args.value(Auth::KeyTerminateOnDisconnect.toString()).toBool());
     }
     if (args.contains(Auth::KeyAutogenerateCertificates.toString())) {
-        group.writeEntry("AutogenerateCertificates", args.value(Auth::KeyAutogenerateCertificates.toString()).toBool());
+        group.writeEntry(Defaults::EntryAutogenerateCertificates, args.value(Auth::KeyAutogenerateCertificates.toString()).toBool());
     }
 
     const QString certPath = args.value(Auth::KeyCertificate.toString(), Defaults::CertificatePath.toString()).toString();
     const QString keyPath = args.value(Auth::KeyCertificateKey.toString(), Defaults::CertificateKeyPath.toString()).toString();
 
-    group.writeEntry("Certificate", certPath);
-    group.writeEntry("CertificateKey", keyPath);
+    group.writeEntry(Defaults::EntryCertificate, certPath);
+    group.writeEntry(Defaults::EntryCertificateKey, keyPath);
     config.sync();
 
     if (args.value(Auth::KeyAutogenerateCertificates.toString(), true).toBool()) {

@@ -42,6 +42,7 @@ public:
     void setMonitorIndex(const std::optional<int> &index);
     void setQuality(const std::optional<int> &quality);
     void setAdaptiveQuality(bool adaptive);
+    void setHandoverMode(bool handover);
     OperationMode operationMode() const;
     void setOperationMode(OperationMode mode);
     void setSNIStatus(const KRdp::RdpConnection::State state);
@@ -67,6 +68,7 @@ private:
     std::vector<std::unique_ptr<SessionWrapper>> m_wrappers;
 
     OperationMode m_operatingMode = OperationMode::SharedAccess;
+    bool m_handover = false;
 
     KStatusNotifierItem *m_sni;
 };

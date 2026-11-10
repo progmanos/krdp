@@ -51,6 +51,36 @@
       </doc:doc>
       <arg type="h" name="socket" direction="out"/>
     </method>
+    <method name="AuthorizeHandover">
+      <arg type="s" name="remoteId" direction="in"/>
+      <arg type="s" name="username" direction="in"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Called by the display manager (running as root) after a user
+          authenticates on a remote greeter to bind remoteId to that user's
+          UID before the user session calls StartHandover().
+        </doc:description>
+      </doc:doc>
+    </method>
+    <method name="TransferHandover">
+      <arg type="s" name="oldRemoteId" direction="in"/>
+      <arg type="s" name="newRemoteId" direction="in"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Transfers an existing user session handover from oldRemoteId to
+          newRemoteId when the same user logs in from a second remote client.
+        </doc:description>
+      </doc:doc>
+    </method>
+    <signal name="HandoverRequested">
+      <arg type="s" name="remoteId"/>
+      <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
+        <doc:description>
+          Emitted to an active user session daemon when it should initiate a
+          new handover for the given remote id to take over a new connection.
+        </doc:description>
+      </doc:doc>
+    </signal>
     <signal name="TakeClientReady">
       <arg type="s" name="remoteId"/>
       <doc:doc xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">

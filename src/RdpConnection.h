@@ -61,6 +61,7 @@ public:
               ///  like client disconnect.
         VideoInitFailed, ///< VideoStream failed to initialize.
         UserLogoff, ///< User logged off from the session.
+        ReplacedByOtherConnection, ///< Another client or local login took over the session.
     };
 
     /**

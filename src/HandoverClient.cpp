@@ -13,6 +13,14 @@
 
 using namespace Qt::StringLiterals;
 
+namespace
+{
+constexpr auto kDispatcherService = "org.kde.krdp.Dispatcher"_L1;
+constexpr auto kDispatcherPath = "/org/kde/krdp/Dispatcher"_L1;
+constexpr auto kStartHandoverMethod = "StartHandover"_L1;
+constexpr auto kTakeClientMethod = "TakeClient"_L1;
+}
+
 namespace KRdp
 {
 
@@ -26,11 +34,9 @@ HandoverClient::HandoverClient(QObject *parent)
     : QObject(parent)
     , d(std::make_unique<Private>())
 {
-    d->interface = new OrgKdeKrdpDispatcherInterface(QLatin1String("org.kde.krdp.Dispatcher"),
-                                                     QLatin1String("/org/kde/krdp/Dispatcher"),
-                                                     QDBusConnection::systemBus(),
-                                                     this);
+    d->interface = new OrgKdeKrdpDispatcherInterface(kDispatcherService.toString(), kDispatcherPath.toString(), QDBusConnection::systemBus(), this);
 
+    connect(d->interface, &OrgKdeKrdpDispatcherInterface::HandoverRequested, this, &HandoverClient::handoverRequested);
     connect(d->interface, &OrgKdeKrdpDispatcherInterface::TakeClientReady, this, &HandoverClient::takeClientReady);
     connect(d->interface, &OrgKdeKrdpDispatcherInterface::RedirectClient, this, &HandoverClient::redirectClient);
     connect(d->interface, &OrgKdeKrdpDispatcherInterface::ClientConnected, this, &HandoverClient::clientConnected);
@@ -49,7 +55,7 @@ void HandoverClient::startHandover(const QString &remoteId,
                                    const QString &password,
                                    std::function<void(bool, const HandoverResult &)> callback)
 {
-    auto *watcher = new QDBusPendingCallWatcher(d->interface->asyncCall(QStringLiteral("StartHandover"), remoteId, username, password), this);
+    auto *watcher = new QDBusPendingCallWatcher(d->interface->asyncCall(kStartHandoverMethod.toString(), remoteId, username, password), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, callback, watcher]() {
         const QDBusMessage reply = watcher->reply();
         watcher->deleteLater();
@@ -69,7 +75,7 @@ void HandoverClient::startHandover(const QString &remoteId,
 
 void HandoverClient::takeClient(const QString &remoteId, std::function<void(bool, int)> callback)
 {
-    auto *watcher = new QDBusPendingCallWatcher(d->interface->asyncCall(QStringLiteral("TakeClient"), remoteId), this);
+    auto *watcher = new QDBusPendingCallWatcher(d->interface->asyncCall(kTakeClientMethod.toString(), remoteId), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, callback, watcher]() {
         const QDBusMessage reply = watcher->reply();
         watcher->deleteLater();

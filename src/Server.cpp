@@ -221,10 +221,13 @@ void Server::createConnection(qintptr handle)
                 if (itr == d->sessions.end()) {
                     return;
                 }
-                // extracted before erasing: ~RdpConnection can spin a nested event loop (KScreen calls
-                // from destroyed() handlers) that re-enters this vector, so destroy it once consistent again
+                // Defer destruction via deleteLater() so other queued slots
+                // connected to RdpConnection::stateChanged(State::Closed) (such
+                // as HandoverManager) execute before ~RdpConnection() clears
+                // QPointer references or cancels pending queued signal events.
                 auto session = std::move(*itr);
                 d->sessions.erase(itr);
+                session.release()->deleteLater();
             }
         },
         Qt::QueuedConnection);

@@ -73,6 +73,11 @@ public:
     void takeClient(const QString &remoteId, std::function<void(bool, int)> callback);
 
     /**
+     * Emitted when the dispatcher asks an active user session to initiate a
+     * new handover for \p remoteId to take over a new connection.
+     */
+    Q_SIGNAL void handoverRequested(const QString &remoteId);
+    /**
      * Emitted when a reconnected client is ready to be retrieved via
      * takeClient().
      */

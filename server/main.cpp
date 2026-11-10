@@ -24,15 +24,109 @@
 
 using namespace Qt::StringLiterals;
 
+namespace
+{
+constexpr auto kEnvRemoteId = "PLASMALOGIN_REMOTE_ID";
+constexpr auto kEnvIsRemote = "PLASMALOGIN_IS_REMOTE";
+constexpr auto kEnvXdgSeat = "XDG_SEAT";
+constexpr auto kEnvXdgSessionClass = "XDG_SESSION_CLASS";
+
+constexpr auto kRemoteSeatUnderscorePrefix = "seat_remote"_L1;
+constexpr auto kRemoteSeatHyphenPrefix = "seat-remote"_L1;
+constexpr auto kGreeterSessionClass = "greeter"_L1;
+constexpr int kEnvEnabledValue = 1;
+
+constexpr auto kDispatcherConfigFileName = "krdpdispatcherrc"_L1;
+constexpr auto kGeneralConfigGroup = "General"_L1;
+constexpr auto kTerminateOnDisconnectKey = "TerminateOnDisconnect";
+
+constexpr auto kAppName = "krdp-server"_L1;
+constexpr auto kAppDisplayName = "KRDP Server"_L1;
+constexpr auto kDesktopFileName = "org.kde.krdpserver"_L1;
+
+constexpr auto kAppDescription =
+    "An RDP server that exposes the current desktop session over the RDP protocol.\nNote that a valid TLS certificate and key is needed. If not provided, a temporary certificate will be generated."_L1;
+
+constexpr auto kOptionUsername = "username"_L1;
+constexpr auto kOptionUsernameShort = "u"_L1;
+constexpr auto kOptionUsernameDesc = "The username to use for login"_L1;
+
+constexpr auto kOptionPassword = "password"_L1;
+constexpr auto kOptionPasswordShort = "p"_L1;
+constexpr auto kOptionPasswordDesc = "The password to use for login. Requires username to be passed as well."_L1;
+
+constexpr auto kOptionAddress = "address"_L1;
+constexpr auto kOptionAddressDesc = "The address to listen on for connections. Defaults to 0.0.0.0"_L1;
+
+constexpr auto kOptionPort = "port"_L1;
+constexpr auto kOptionPortDesc = "The port to use for connections. Defaults to 3389."_L1;
+constexpr auto kDefaultPort = "3389"_L1;
+
+constexpr auto kOptionCertificate = "certificate"_L1;
+constexpr auto kOptionCertificateDesc = "The TLS certificate file to use."_L1;
+constexpr auto kDefaultCertificate = "server.crt"_L1;
+
+constexpr auto kOptionCertificateKey = "certificate-key"_L1;
+constexpr auto kOptionCertificateKeyDesc = "The TLS certificate key to use."_L1;
+constexpr auto kDefaultCertificateKey = "server.key"_L1;
+
+constexpr auto kOptionMonitor = "monitor"_L1;
+constexpr auto kOptionMonitorDesc = "The index of the monitor to use when streaming."_L1;
+constexpr auto kDefaultMonitor = "-1"_L1;
+
+constexpr auto kOptionVirtualMonitor = "virtual-monitor"_L1;
+constexpr auto kOptionVirtualMonitorDesc = "Creates a new virtual output to connect to (WIDTHxHEIGHT@SCALE, e.g. 1920x1080@1). Incompatible with --monitor."_L1;
+constexpr auto kOptionVirtualMonitorValueName = "data"_L1;
+constexpr auto kDefaultVirtualMonitorValue = "1920x1080@1"_L1;
+
+constexpr auto kOptionMode = "mode"_L1;
+constexpr auto kOptionModeDesc = "The operation mode to use: RemoteAccess, SharedAccess, or AdditionalDisplay."_L1;
+
+constexpr auto kOptionQuality = "quality"_L1;
+constexpr auto kOptionQualityDesc =
+    "Encoding quality of the stream, from 0 (lowest) to 100 (highest). With adaptive quality (the default) this is the upper bound; with --static-quality it is the fixed quality."_L1;
+
+constexpr auto kOptionAdaptiveQuality = "adaptive-quality"_L1;
+constexpr auto kOptionAdaptiveQualityDesc =
+    "Adjust the encoding quality at runtime based on the client's network conditions, up to --quality. On by default; only matters if disabled in the configuration."_L1;
+
+constexpr auto kOptionStaticQuality = "static-quality"_L1;
+constexpr auto kOptionStaticQualityDesc = "Pin the encoding quality at --quality instead of adapting it to the client's network conditions."_L1;
+
+constexpr auto kOptionHandover = "handover"_L1;
+constexpr auto kOptionHandoverDesc =
+    "Run as the destination of a remote login handover with the system KRdp dispatcher, instead of listening for connections."_L1;
+
+constexpr auto kOptionRemoteId = "remote-id"_L1;
+constexpr auto kOptionRemoteIdDesc = "The remote id of the client to serve. Must be used with --handover."_L1;
+
+constexpr auto kOptionTerminateOnDisconnect = "terminate-on-disconnect"_L1;
+constexpr auto kOptionTerminateOnDisconnectDesc = "Terminate the user session when the client disconnects (default in handover mode)."_L1;
+
+constexpr auto kOptionNoTerminateOnDisconnect = "no-terminate-on-disconnect"_L1;
+constexpr auto kOptionNoTerminateOnDisconnectDesc = "Do not terminate the user session when the client disconnects."_L1;
+
+constexpr auto kOptionPlasma = "plasma"_L1;
+constexpr auto kOptionPlasmaDesc = "Use Plasma protocols instead of XDP"_L1;
+
+constexpr auto kKeychainService = "KRDP"_L1;
+constexpr auto kModeRemoteAccess = "RemoteAccess"_L1;
+constexpr auto kModeSharedAccess = "SharedAccess"_L1;
+constexpr auto kModeAdditionalDisplay = "AdditionalDisplay"_L1;
+
+static const auto kVirtualMonitorRegexPattern = QStringLiteral(R"((\d+)x(\d+)@([\d.]+))");
+const QRegularExpression kVirtualMonitorPattern(kVirtualMonitorRegexPattern);
+}
+
 static std::optional<SessionController::OperationMode> parseOperationMode(QAnyStringView value)
 {
-    if (value == u"RemoteAccess"_s) {
+    if (value == kModeRemoteAccess) {
         return SessionController::OperationMode::RemoteAccess;
     }
-    if (value == u"SharedAccess"_s) {
+    if (value == kModeSharedAccess) {
         return SessionController::OperationMode::SharedAccess;
     }
-    if (value == u"AdditionalDisplay"_s) {
+    if (value == kModeAdditionalDisplay) {
         return SessionController::OperationMode::AdditionalDisplay;
     }
 
@@ -42,43 +136,39 @@ static std::optional<SessionController::OperationMode> parseOperationMode(QAnySt
 int main(int argc, char **argv)
 {
     QApplication application{argc, argv};
-    application.setApplicationName(u"krdp-server"_s);
-    application.setApplicationDisplayName(u"KRDP Server"_s);
+    application.setApplicationName(kAppName.toString());
+    application.setApplicationDisplayName(kAppDisplayName.toString());
 
-    KAboutData about(u"krdp-server"_s, u"KRDP Server"_s, QStringLiteral(KRdp_VERSION_STRING));
-    about.setDesktopFileName(u"org.kde.krdpserver"_s);
+    KAboutData about(kAppName.toString(), kAppDisplayName.toString(), QStringLiteral(KRdp_VERSION_STRING));
+    about.setDesktopFileName(kDesktopFileName.toString());
     KAboutData::setApplicationData(about);
 
     KCrash::initialize();
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(
-        u"An RDP server that exposes the current desktop session over the RDP protocol.\nNote that a valid TLS certificate and key is needed. If not provided, a temporary certificate will be generated."_s);
+    parser.setApplicationDescription(kAppDescription.toString());
     parser.addOptions({
-        {{u"u"_s, u"username"_s}, u"The username to use for login"_s, u"username"_s},
-        {{u"p"_s, u"password"_s}, u"The password to use for login. Requires username to be passed as well."_s, u"password"_s},
-        {u"address"_s, u"The address to listen on for connections. Defaults to 0.0.0.0"_s, u"address"_s},
-        {u"port"_s, u"The port to use for connections. Defaults to 3389."_s, u"port"_s, u"3389"_s},
-        {u"certificate"_s, u"The TLS certificate file to use."_s, u"certificate"_s, u"server.crt"_s},
-        {u"certificate-key"_s, u"The TLS certificate key to use."_s, u"certificate-key"_s, u"server.key"_s},
-        {u"monitor"_s, u"The index of the monitor to use when streaming."_s, u"monitor"_s, u"-1"_s},
-        {u"virtual-monitor"_s,
-         u"Creates a new virtual output to connect to (WIDTHxHEIGHT@SCALE, e.g. 1920x1080@1). Incompatible with --monitor."_s,
-         u"data"_s,
-         u"1920x1080@1"_s},
-        {u"mode"_s, u"The operation mode to use: RemoteAccess, SharedAccess, or AdditionalDisplay."_s, u"mode"_s},
-        {u"quality"_s,
-         u"Encoding quality of the stream, from 0 (lowest) to 100 (highest). With adaptive quality (the default) this is the upper bound; with --static-quality it is the fixed quality."_s,
-         u"quality"_s},
-        {u"adaptive-quality"_s,
-         u"Adjust the encoding quality at runtime based on the client's network conditions, up to --quality. On by default; only matters if disabled in the configuration."_s},
-        {u"static-quality"_s, u"Pin the encoding quality at --quality instead of adapting it to the client's network conditions."_s},
-        {u"handover"_s, u"Run as the destination of a remote login handover with the system KRdp dispatcher, instead of listening for connections."_s},
-        {u"remote-id"_s, u"The remote id of the client to serve. Must be used with --handover."_s, u"remote-id"_s},
-        {u"terminate-on-disconnect"_s, u"Terminate the user session when the client disconnects (default in handover mode)."_s},
-        {u"no-terminate-on-disconnect"_s, u"Do not terminate the user session when the client disconnects."_s},
+        {{kOptionUsernameShort.toString(), kOptionUsername.toString()}, kOptionUsernameDesc.toString(), kOptionUsername.toString()},
+        {{kOptionPasswordShort.toString(), kOptionPassword.toString()}, kOptionPasswordDesc.toString(), kOptionPassword.toString()},
+        {kOptionAddress.toString(), kOptionAddressDesc.toString(), kOptionAddress.toString()},
+        {kOptionPort.toString(), kOptionPortDesc.toString(), kOptionPort.toString(), kDefaultPort.toString()},
+        {kOptionCertificate.toString(), kOptionCertificateDesc.toString(), kOptionCertificate.toString(), kDefaultCertificate.toString()},
+        {kOptionCertificateKey.toString(), kOptionCertificateKeyDesc.toString(), kOptionCertificateKey.toString(), kDefaultCertificateKey.toString()},
+        {kOptionMonitor.toString(), kOptionMonitorDesc.toString(), kOptionMonitor.toString(), kDefaultMonitor.toString()},
+        {kOptionVirtualMonitor.toString(),
+         kOptionVirtualMonitorDesc.toString(),
+         kOptionVirtualMonitorValueName.toString(),
+         kDefaultVirtualMonitorValue.toString()},
+        {kOptionMode.toString(), kOptionModeDesc.toString(), kOptionMode.toString()},
+        {kOptionQuality.toString(), kOptionQualityDesc.toString(), kOptionQuality.toString()},
+        {kOptionAdaptiveQuality.toString(), kOptionAdaptiveQualityDesc.toString()},
+        {kOptionStaticQuality.toString(), kOptionStaticQualityDesc.toString()},
+        {kOptionHandover.toString(), kOptionHandoverDesc.toString()},
+        {kOptionRemoteId.toString(), kOptionRemoteIdDesc.toString(), kOptionRemoteId.toString()},
+        {kOptionTerminateOnDisconnect.toString(), kOptionTerminateOnDisconnectDesc.toString()},
+        {kOptionNoTerminateOnDisconnect.toString(), kOptionNoTerminateOnDisconnectDesc.toString()},
 #ifdef WITH_PLASMA_SESSION
-        {u"plasma"_s, u"Use Plasma protocols instead of XDP"_s},
+        {kOptionPlasma.toString(), kOptionPlasmaDesc.toString()},
 #endif
     });
     about.setupCommandLine(&parser);
@@ -103,15 +193,15 @@ int main(int argc, char **argv)
     };
 
     QHostAddress address = QHostAddress::Any;
-    if (parser.isSet(u"address"_s)) {
-        address = QHostAddress(parser.value(u"address"_s));
+    if (parser.isSet(kOptionAddress)) {
+        address = QHostAddress(parser.value(kOptionAddress));
     }
-    auto port = parserValueWithDefault(u"port", config->listenPort());
-    auto certificate = std::filesystem::path(parserValueWithDefault(u"certificate", config->certificate()).toStdString());
-    auto certificateKey = std::filesystem::path(parserValueWithDefault(u"certificate-key", config->certificateKey()).toStdString());
+    auto port = parserValueWithDefault(kOptionPort, config->listenPort());
+    auto certificate = std::filesystem::path(parserValueWithDefault(kOptionCertificate, config->certificate()).toStdString());
+    auto certificateKey = std::filesystem::path(parserValueWithDefault(kOptionCertificateKey, config->certificateKey()).toStdString());
 
-    const QString remoteId = parser.isSet(u"remote-id"_s) ? parser.value(u"remote-id"_s) : qEnvironmentVariable("PLASMALOGIN_REMOTE_ID");
-    const bool handover = parser.isSet(u"handover"_s) || !remoteId.isEmpty();
+    const QString remoteId = parser.isSet(kOptionRemoteId) ? parser.value(kOptionRemoteId) : qEnvironmentVariable(kEnvRemoteId);
+    const bool handover = parser.isSet(kOptionHandover) || !remoteId.isEmpty();
     if (handover && remoteId.isEmpty()) {
         qWarning() << "--handover requires a --remote-id.";
         return -1;
@@ -126,10 +216,10 @@ int main(int argc, char **argv)
     server.setTlsCertificateKey(certificateKey);
 
     // Use parsed username/pw if set
-    if (!handover && parser.isSet(u"username"_s)) {
+    if (!handover && parser.isSet(kOptionUsername)) {
         KRdp::User user;
-        user.name = parser.value(u"username"_s);
-        user.password = parser.value(u"password"_s);
+        user.name = parser.value(kOptionUsername);
+        user.password = parser.value(kOptionPassword);
         server.addUser(user);
     }
     // Otherwise use KCM username list
@@ -141,7 +231,7 @@ int main(int argc, char **argv)
 
         const auto users = config->users();
         for (const auto &userName : users) {
-            const auto readJob = new QKeychain::ReadPasswordJob(QLatin1StringView("KRDP"));
+            const auto readJob = new QKeychain::ReadPasswordJob(kKeychainService.toString());
             readJob->setKey(QLatin1StringView(userName.toLatin1()));
             QObject::connect(readJob, &QKeychain::ReadPasswordJob::finished, &server, [userName, readJob, &server]() {
                 KRdp::User user;
@@ -168,52 +258,57 @@ int main(int argc, char **argv)
 
     const auto sessionType =
 #ifdef WITH_PLASMA_SESSION
-        (parser.isSet(u"plasma"_s) || handover) ? SessionController::SessionType::Plasma :
+        (parser.isSet(kOptionPlasma) || handover) ? SessionController::SessionType::Plasma :
 #endif
-                                                SessionController::SessionType::Portal;
+                                                  SessionController::SessionType::Portal;
+    const QString xdgSeat = qEnvironmentVariable(kEnvXdgSeat);
+    const bool isHeadlessRemoteSession = qEnvironmentVariableIntValue(kEnvIsRemote) == kEnvEnabledValue
+        || xdgSeat.startsWith(kRemoteSeatUnderscorePrefix, Qt::CaseInsensitive) || xdgSeat.startsWith(kRemoteSeatHyphenPrefix, Qt::CaseInsensitive);
+
     SessionController controller(&server, sessionType);
-    if (parser.isSet(u"virtual-monitor"_s)) {
-        const QString vmData = parser.value(u"virtual-monitor"_s);
-        const QRegularExpression rx(uR"((\d+)x(\d+)@([\d.]+))"_s);
-        const auto match = rx.match(vmData);
+    controller.setHandoverMode(handover);
+    if (parser.isSet(kOptionVirtualMonitor)) {
+        const QString vmData = parser.value(kOptionVirtualMonitor);
+        const auto match = kVirtualMonitorPattern.match(vmData);
         if (!match.hasMatch()) {
             qWarning() << "failed to parse" << vmData << ".  Should be WIDTHxHEIGHT@SCALE";
             return 1;
         }
         controller.setVirtualMonitor({vmData, {match.capturedView(1).toInt(), match.capturedView(2).toInt()}, match.capturedView(3).toDouble()});
-    } else if (parser.isSet(u"monitor"_s)) {
-        controller.setMonitorIndex(parser.value(u"monitor"_s).toInt());
-    } else if (handover) {
-        // Headless remote sessions already run KWin with --virtual, so stream
-        // the primary virtual output directly.
-        constexpr int kPrimaryMonitorIndex = 0;
-        controller.setMonitorIndex(kPrimaryMonitorIndex);
+    } else if (parser.isSet(kOptionMonitor)) {
+        controller.setMonitorIndex(parser.value(kOptionMonitor).toInt());
     } else {
         controller.setMonitorIndex(std::nullopt);
     }
-    controller.setQuality(parserValueWithDefault(u"quality", config->quality()));
-    controller.setAdaptiveQuality((parser.isSet(u"adaptive-quality"_s) || config->adaptiveQuality()) && !parser.isSet(u"static-quality"_s));
-    if (parser.isSet(u"mode"_s)) {
-        const auto mode = parseOperationMode(parser.value(u"mode"_s));
+    controller.setQuality(parserValueWithDefault(kOptionQuality, config->quality()));
+    controller.setAdaptiveQuality((parser.isSet(kOptionAdaptiveQuality) || config->adaptiveQuality()) && !parser.isSet(kOptionStaticQuality));
+    if (parser.isSet(kOptionMode)) {
+        const auto mode = parseOperationMode(parser.value(kOptionMode));
         if (!mode) {
-            qWarning() << "failed to parse operation mode" << parser.value(u"mode"_s) << ". Expected RemoteAccess, SharedAccess, or AdditionalDisplay";
+            qWarning() << "failed to parse operation mode" << parser.value(kOptionMode) << ". Expected RemoteAccess, SharedAccess, or AdditionalDisplay";
             return 1;
         }
         controller.setOperationMode(*mode);
+    } else if (handover) {
+        // User handover sessions (both headless remote-first and hot-swapped
+        // from seat0) create a dedicated virtual output for the RDP client that
+        // is automatically removed when krdpserver stops on local console takeover.
+        controller.setOperationMode(SessionController::OperationMode::RemoteAccess);
     } else {
         controller.setOperationMode(config->exclusiveMode() ? SessionController::OperationMode::RemoteAccess : SessionController::OperationMode::SharedAccess);
     }
 
     if (handover) {
-        bool terminateOnDisconnect = true;
-        {
-            KSharedConfig::Ptr dispatcherConfig = KSharedConfig::openConfig(QStringLiteral("krdpdispatcherrc"));
-            KConfigGroup generalGroup = dispatcherConfig->group(QStringLiteral("General"));
-            terminateOnDisconnect = generalGroup.readEntry("TerminateOnDisconnect", true);
+        const bool isGreeterSession = qEnvironmentVariable(kEnvXdgSessionClass) == kGreeterSessionClass;
+        bool terminateOnDisconnect = isHeadlessRemoteSession && !isGreeterSession;
+        if (terminateOnDisconnect) {
+            KSharedConfig::Ptr dispatcherConfig = KSharedConfig::openConfig(kDispatcherConfigFileName.toString());
+            KConfigGroup generalGroup = dispatcherConfig->group(kGeneralConfigGroup.toString());
+            terminateOnDisconnect = generalGroup.readEntry(kTerminateOnDisconnectKey, true);
         }
-        if (parser.isSet(u"no-terminate-on-disconnect"_s)) {
+        if (parser.isSet(kOptionNoTerminateOnDisconnect)) {
             terminateOnDisconnect = false;
-        } else if (parser.isSet(u"terminate-on-disconnect"_s)) {
+        } else if (parser.isSet(kOptionTerminateOnDisconnect)) {
             terminateOnDisconnect = true;
         }
 

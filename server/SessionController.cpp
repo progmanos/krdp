@@ -3,6 +3,7 @@
 
 #include "SessionController.h"
 #include "DisplayControl.h"
+#include "NotificationUtil.h"
 #include "VideoStream.h"
 
 #include <QAction>
@@ -33,9 +34,79 @@
 #include <PlasmaScreencastV1Session.h>
 #endif
 
-#include "VideoStream.h"
-
 using namespace Qt::StringLiterals;
+
+namespace
+{
+using namespace std::chrono_literals;
+
+// Coalesces rapid DISPLAYCONTROL_MONITOR_LAYOUT_PDU stream events (sent at
+// 30-60 Hz while a user drags the RDP client window border) so the PipeWire
+// stream and H.264 encoder are only re-initialized once dragging pauses.
+constexpr auto kResizeDebounceInterval = 150ms;
+
+// Fallback initial virtual monitor geometry used only when the RDP client does
+// not advertise a desktop size prior to activation and --virtual-monitor is unset.
+constexpr QSize kDefaultVirtualMonitorSize(1024, 768);
+constexpr double kDefaultVirtualMonitorDpr = 1.0;
+
+constexpr auto kEnvXdgSeatPath = "XDG_SEAT_PATH";
+constexpr auto kEnvIsRemote = "PLASMALOGIN_IS_REMOTE";
+constexpr int kEnvEnabledValue = 1;
+constexpr auto kDisplayManagerService = "org.freedesktop.DisplayManager"_L1;
+constexpr auto kDisplayManagerPath = "/org/freedesktop/DisplayManager"_L1;
+constexpr auto kDisplayManagerInterface = "org.freedesktop.DisplayManager"_L1;
+constexpr auto kDisplayManagerSeatInterface = "org.freedesktop.DisplayManager.Seat"_L1;
+constexpr auto kSwitchToGreeterMethod = "SwitchToGreeter"_L1;
+constexpr auto kDbusPropertiesInterface = "org.freedesktop.DBus.Properties"_L1;
+constexpr auto kDbusGetMethod = "Get"_L1;
+constexpr auto kSeatsProperty = "Seats"_L1;
+
+constexpr auto kLogindService = "org.freedesktop.login1"_L1;
+constexpr auto kLogindAutoSessionPath = "/org/freedesktop/login1/session/auto"_L1;
+constexpr auto kLogindSessionInterface = "org.freedesktop.login1.Session"_L1;
+constexpr auto kLogindLockMethod = "Lock"_L1;
+constexpr auto kLogindUnlockMethod = "Unlock"_L1;
+
+constexpr auto kRemoteDesktopIcon = "preferences-system-network-remote"_L1;
+constexpr auto kNetworkDisconnectIcon = "network-disconnect"_L1;
+constexpr auto kApplicationExitIcon = "application-exit"_L1;
+
+constexpr auto kSniId = "krdpserver"_L1;
+constexpr auto kSystemd1Service = "org.freedesktop.systemd1"_L1;
+constexpr auto kSystemd1ServerUnitPath = "/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ekrdpserver_2eservice"_L1;
+constexpr auto kSystemd1UnitInterface = "org.freedesktop.systemd1.Unit"_L1;
+constexpr auto kSystemd1StopMethod = "Stop"_L1;
+
+// Hardware/software H.264 encoders using YUV 4:2:0 chroma subsampling require
+// even frame width and height; clear the lowest bit to round down to even.
+QSize alignToEvenDimensions(const QSize &size)
+{
+    return QSize(size.width() & ~1, size.height() & ~1);
+}
+
+QString resolveDisplayManagerSeatPath()
+{
+    const QString envSeatPath = qEnvironmentVariable(kEnvXdgSeatPath);
+    if (!envSeatPath.isEmpty()) {
+        return envSeatPath;
+    }
+
+    QDBusMessage getSeatsMsg = QDBusMessage::createMethodCall(kDisplayManagerService.toString(),
+                                                              kDisplayManagerPath.toString(),
+                                                              kDbusPropertiesInterface.toString(),
+                                                              kDbusGetMethod.toString());
+    getSeatsMsg << kDisplayManagerInterface.toString() << kSeatsProperty.toString();
+    const QDBusReply<QVariant> reply = QDBusConnection::systemBus().call(getSeatsMsg);
+    if (reply.isValid()) {
+        const auto seats = qdbus_cast<QList<QDBusObjectPath>>(reply.value());
+        if (!seats.isEmpty()) {
+            return seats.constFirst().path();
+        }
+    }
+    return {};
+}
+}
 
 class SessionWrapper : public QObject
 {
@@ -84,7 +155,7 @@ public:
         if (!size.isValid() || size.isEmpty()) {
             return;
         }
-        const QSize alignedSize(size.width() & ~1, size.height() & ~1);
+        const QSize alignedSize = alignToEvenDimensions(size);
         if (alignedSize.isEmpty() || alignedSize == m_lastAppliedSize) {
             return;
         }
@@ -96,7 +167,6 @@ public:
             applyRequestedScreenSize(m_pendingResizeSize);
         } else {
             // Interactive resize: debounce to avoid rapid back-to-back encoder re-inits
-            constexpr auto kResizeDebounceInterval = std::chrono::milliseconds(150);
             m_resizeDebounceTimer.start(kResizeDebounceInterval);
         }
     }
@@ -168,10 +238,10 @@ SessionController::SessionController(KRdp::Server *server, SessionType sessionTy
 {
     connect(m_server, &KRdp::Server::newConnectionCreated, this, &SessionController::onNewConnection);
     // Status notification item
-    m_sni = new KStatusNotifierItem(u"krdpserver"_s, this);
+    m_sni = new KStatusNotifierItem(kSniId.toString(), this);
     m_sni->setStandardActionsEnabled(false);
     m_sni->setTitle(i18n("Remote Desktop Sharing"));
-    m_sni->setIconByName(u"preferences-system-network-remote"_s);
+    m_sni->setIconByName(kRemoteDesktopIcon.toString());
     m_sni->setStatus(KStatusNotifierItem::Passive);
     m_sni->setToolTipTitle(i18n("Remote Desktop"));
     m_sni->setToolTipSubTitle(i18n("No active connections"));
@@ -184,15 +254,21 @@ SessionController::~SessionController() noexcept
 
 void SessionController::switchToGreeter()
 {
-    const QString seatPath = qEnvironmentVariable("XDG_SEAT_PATH", QStringLiteral("/org/freedesktop/DisplayManager/Seat0"));
-    QDBusMessage message = QDBusMessage::createMethodCall(QStringLiteral("org.freedesktop.DisplayManager"),
-                                                          seatPath,
-                                                          QStringLiteral("org.freedesktop.DisplayManager.Seat"),
-                                                          QStringLiteral("SwitchToGreeter"));
+    if (qEnvironmentVariableIntValue(kEnvIsRemote) == kEnvEnabledValue) {
+        return;
+    }
+
+    const QString seatPath = resolveDisplayManagerSeatPath();
+    if (seatPath.isEmpty()) {
+        qWarning() << "Could not resolve DisplayManager seat path to switch to greeter";
+        return;
+    }
+    QDBusMessage message =
+        QDBusMessage::createMethodCall(kDisplayManagerService.toString(), seatPath, kDisplayManagerSeatInterface.toString(), kSwitchToGreeterMethod.toString());
 
     QDBusPendingCall pendingCall = QDBusConnection::systemBus().asyncCall(message);
 
-    auto *watcher = new QDBusPendingCallWatcher(pendingCall);
+    auto *watcher = new QDBusPendingCallWatcher(pendingCall, this);
 
     QObject::connect(watcher, &QDBusPendingCallWatcher::finished, watcher, [watcher]() {
         QDBusPendingReply<> reply = *watcher;
@@ -227,6 +303,11 @@ void SessionController::setAdaptiveQuality(bool adaptive)
     m_adaptiveQuality = adaptive;
 }
 
+void SessionController::setHandoverMode(bool handover)
+{
+    m_handover = handover;
+}
+
 SessionController::OperationMode SessionController::operationMode() const
 {
     return m_operatingMode;
@@ -240,12 +321,11 @@ void SessionController::setOperationMode(OperationMode mode)
 void SessionController::setSessionLocked(bool locked)
 {
     auto bus = QDBusConnection::systemBus();
-    const QString service = u"org.freedesktop.login1"_s;
 
-    QDBusMessage lockMsg = QDBusMessage::createMethodCall(service,
-                                                          u"/org/freedesktop/login1/session/auto"_s,
-                                                          u"org.freedesktop.login1.Session"_s,
-                                                          locked ? u"Lock"_s : u"Unlock"_s);
+    QDBusMessage lockMsg = QDBusMessage::createMethodCall(kLogindService.toString(),
+                                                          kLogindAutoSessionPath.toString(),
+                                                          kLogindSessionInterface.toString(),
+                                                          locked ? kLogindLockMethod.toString() : kLogindUnlockMethod.toString());
     auto *lockWatcher = new QDBusPendingCallWatcher(bus.asyncCall(lockMsg), this);
     connect(lockWatcher, &QDBusPendingCallWatcher::finished, this, [locked](QDBusPendingCallWatcher *self) {
         const QDBusPendingReply<> reply = *self;
@@ -272,10 +352,12 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
             wrapper->session->setActiveStream(*m_monitorIndex);
         } else {
             // without an explicit override, we follow the operating mode
+            const QSize requestedSize = newConnection->videoStream()->requestedSize();
+            const QSize initialSize = (requestedSize.isValid() && !requestedSize.isEmpty()) ? alignToEvenDimensions(requestedSize) : kDefaultVirtualMonitorSize;
             KRdp::VirtualMonitor defaultMonitor;
             defaultMonitor.name = i18n("Remote Monitor");
-            defaultMonitor.dpr = 1;
-            defaultMonitor.size = QSize(1024, 768);
+            defaultMonitor.dpr = kDefaultVirtualMonitorDpr;
+            defaultMonitor.size = initialSize;
             switch (m_operatingMode) {
             case OperationMode::SharedAccess:
                 // we do not set a virtual monitor, allowing the client to see all the existing session.
@@ -293,7 +375,9 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
             }
         }
         wrapper->connection->videoStream()->setAdaptiveQuality(m_adaptiveQuality);
-        wrapper->connection->videoStream()->setVideoQuality(m_quality.value());
+        if (m_quality.has_value()) {
+            wrapper->connection->videoStream()->setVideoQuality(*m_quality);
+        }
         connect(wrapper.get(), &SessionWrapper::connectionDestroyed, this, [this](SessionWrapper *wrapper) {
             m_wrappers.erase(std::remove_if(m_wrappers.begin(),
                                             m_wrappers.end(),
@@ -306,7 +390,9 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
                 m_sni->setStatus(KStatusNotifierItem::Passive);
                 m_sni->setToolTipTitle(i18n("Remote Desktop"));
                 m_sni->setToolTipSubTitle(i18n("No active connections"));
-                m_sni->showMessage(i18n("Remote Desktop Sharing"), i18n("Remote desktop session ended"), QStringLiteral("preferences-system-network-remote"));
+                if (!m_handover) {
+                    m_sni->showMessage(i18n("Remote Desktop Sharing"), i18n("Remote desktop session ended"), kRemoteDesktopIcon.toString());
+                }
 
                 if (m_operatingMode == OperationMode::RemoteAccess) {
                     setSessionLocked(true);
@@ -327,10 +413,20 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
 
         const QString user = newConnection->username();
         const QString addr = newConnection->clientAddress();
-        const QString clientInfo = user.isEmpty() ? addr : QStringLiteral("%1 (%2)").arg(user, addr);
+        const QString clientInfo = KRdpServer::ClientUtil::formatClientLabel(user, addr);
         m_sni->setToolTipSubTitle(i18n("Connected: %1", clientInfo));
 
-        m_sni->showMessage(i18n("Remote Desktop Sharing"), i18n("Remote user connected: %1", clientInfo), QStringLiteral("preferences-system-network-remote"));
+        if (m_operatingMode == OperationMode::RemoteAccess) {
+            connect(newConnection, &KRdp::RdpConnection::stateChanged, this, [addr](KRdp::RdpConnection::State connState) {
+                if (connState == KRdp::RdpConnection::State::Streaming) {
+                    const QString body = addr.isEmpty() ? i18n("Your local desktop session is now active over Remote Desktop.")
+                                                        : i18n("Your local desktop session is now active over Remote Desktop (%1).", addr);
+                    KRdpServer::NotificationUtil::sendNotification(i18n("Session Transferred to Remote Desktop"), body);
+                }
+            });
+        } else if (!m_handover) {
+            m_sni->showMessage(i18n("Remote Desktop Sharing"), i18n("Remote user connected: %1", clientInfo), kRemoteDesktopIcon.toString());
+        }
 
         updateTrayMenu();
     });
@@ -338,7 +434,13 @@ void SessionController::onNewConnection(KRdp::RdpConnection *newConnection)
 
 void SessionController::updateTrayMenu()
 {
-    auto menu = new QMenu();
+    QMenu *menu = m_sni->contextMenu();
+    if (!menu) {
+        menu = new QMenu();
+        m_sni->setContextMenu(menu);
+    } else {
+        menu->clear();
+    }
 
     if (m_wrappers.empty()) {
         auto statusAction = menu->addAction(i18n("No active connections"));
@@ -350,7 +452,7 @@ void SessionController::updateTrayMenu()
             }
             const QString user = wrapper->connection->username();
             const QString addr = wrapper->connection->clientAddress();
-            const QString clientLabel = user.isEmpty() ? addr : QStringLiteral("%1 (%2)").arg(user, addr);
+            const QString clientLabel = KRdpServer::ClientUtil::formatClientLabel(user, addr);
 
             auto headerAction = menu->addAction(i18n("Client: %1", clientLabel));
             headerAction->setEnabled(false);
@@ -362,7 +464,7 @@ void SessionController::updateTrayMenu()
                 wrapperPtr->allowRemoteControl = checked;
             });
 
-            auto disconnectAction = menu->addAction(QIcon::fromTheme(QStringLiteral("network-disconnect")), i18n("Disconnect Client"));
+            auto disconnectAction = menu->addAction(QIcon::fromTheme(kNetworkDisconnectIcon.toString()), i18n("Disconnect Client"));
             connect(disconnectAction, &QAction::triggered, wrapper.get(), [wrapperPtr = wrapper.get()]() {
                 wrapperPtr->disconnectClient();
             });
@@ -372,21 +474,17 @@ void SessionController::updateTrayMenu()
     }
 
     menu->addSeparator();
-    auto stopAction = menu->addAction(QIcon::fromTheme(QStringLiteral("application-exit")), i18n("Stop Sharing Service"));
+    auto stopAction = menu->addAction(QIcon::fromTheme(kApplicationExitIcon.toString()), i18n("Stop Sharing Service"));
     connect(stopAction, &QAction::triggered, this, &SessionController::stopFromSNI);
-
-    m_sni->setContextMenu(menu);
 }
 
 void SessionController::stopFromSNI()
 {
     // Uses dbus to stop the server service, like in the KCM
     // This kills all krdpserver instances, like a "panic button"
-    QDBusInterface unit(u"org.freedesktop.systemd1"_s,
-                        u"/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ekrdpserver_2eservice"_s,
-                        u"org.freedesktop.systemd1.Unit"_s);
+    QDBusInterface unit(kSystemd1Service.toString(), kSystemd1ServerUnitPath.toString(), kSystemd1UnitInterface.toString());
 
-    unit.asyncCall(u"Stop"_s);
+    unit.asyncCall(kSystemd1StopMethod.toString());
     QCoreApplication::quit();
 }
 

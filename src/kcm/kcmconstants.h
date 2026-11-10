@@ -18,6 +18,13 @@ inline constexpr auto CertificateKeyPath = "/etc/krdp/server.key"_L1;
 inline constexpr auto ConfigPath = "/etc/xdg/krdpdispatcherrc"_L1;
 inline constexpr auto ConfigDir = "/etc/xdg"_L1;
 inline constexpr auto ConfigGroupGeneral = "General"_L1;
+
+inline constexpr auto EntryListenAddress = "ListenAddress"_L1;
+inline constexpr auto EntryListenPort = "ListenPort"_L1;
+inline constexpr auto EntryTerminateOnDisconnect = "TerminateOnDisconnect"_L1;
+inline constexpr auto EntryAutogenerateCertificates = "AutogenerateCertificates"_L1;
+inline constexpr auto EntryCertificate = "Certificate"_L1;
+inline constexpr auto EntryCertificateKey = "CertificateKey"_L1;
 }
 
 namespace Service
@@ -63,6 +70,19 @@ inline constexpr auto KeyTerminateOnDisconnect = "terminateOnDisconnect"_L1;
 inline constexpr auto KeyAutogenerateCertificates = "autogenerateCertificates"_L1;
 inline constexpr auto KeyCertificate = "certificate"_L1;
 inline constexpr auto KeyCertificateKey = "certificateKey"_L1;
+
+inline constexpr auto OpenSslBinary = "openssl"_L1;
+inline constexpr auto OpenSslReqCmd = "req"_L1;
+inline constexpr auto OpenSslNodesFlag = "-nodes"_L1;
+inline constexpr auto OpenSslX509Flag = "-x509"_L1;
+inline constexpr auto OpenSslNewKeyFlag = "-newkey"_L1;
+inline constexpr auto OpenSslRsa2048 = "rsa:2048"_L1;
+inline constexpr auto OpenSslKeyOutFlag = "-keyout"_L1;
+inline constexpr auto OpenSslOutFlag = "-out"_L1;
+inline constexpr auto OpenSslDaysFlag = "-days"_L1;
+inline constexpr auto OpenSslValidityDays = "3650"_L1;
+inline constexpr auto OpenSslSubjFlag = "-subj"_L1;
+inline constexpr auto OpenSslSubjValue = "/CN=krdp-dispatcher"_L1;
 }
 
 } // namespace KRdpKcm

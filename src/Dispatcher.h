@@ -114,6 +114,23 @@ public:
      */
     QDBusUnixFileDescriptor TakeClient(const QString &remoteId);
 
+    /**
+     * D-Bus method @c AuthorizeHandover, see org.kde.krdp.Dispatcher.xml.
+     *
+     * Binds \p remoteId to \p username's UID so only that user's session may
+     * call @c StartHandover for \p remoteId. Restricted to root (the display
+     * manager daemon).
+     */
+    void AuthorizeHandover(const QString &remoteId, const QString &username);
+
+    /**
+     * D-Bus method @c TransferHandover, see org.kde.krdp.Dispatcher.xml.
+     *
+     * Transfers an active user session handover from \p oldRemoteId to
+     * \p newRemoteId when the same user logs in from a second remote client.
+     */
+    void TransferHandover(const QString &oldRemoteId, const QString &newRemoteId);
+
 protected:
     /**
      * Overridden from QTcpServer.
@@ -128,6 +145,7 @@ private:
     void tryPeek(qintptr handle);
     void cleanupPeek(qintptr handle);
 
+    void emitHandoverRequested(const QString &destination, const QString &remoteId);
     void emitTakeClientReady(const QString &remoteId);
     void emitRedirectClient(const QString &destination, const QString &remoteId, const QString &username, const QString &password);
     void emitClientConnected(const QString &remoteId);
